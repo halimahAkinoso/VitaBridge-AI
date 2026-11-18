@@ -21,22 +21,40 @@ import { saveAdultBaseline } from '../../../src/api';
 type BaselineForm = {
   health_conditions: string[];
   blood_pressure_history: string;
+  systolic_bp_mmhg: string;
+  diastolic_bp_mmhg: string;
+  blood_glucose_mmol_l: string;
+  cholesterol_mmol_l: string;
+  weight_kg: string;
   sleep_quality: string;
+  sleep_hours: string;
+  snoring: string;
   physical_activity: string;
   social_engagement: string;
+  everyday_function: string;
   mood: string;
   memory_concerns: string;
+  family_history: string;
   additional_notes: string;
 };
 
 const INITIAL_FORM: BaselineForm = {
   health_conditions: [],
   blood_pressure_history: '',
+  systolic_bp_mmhg: '',
+  diastolic_bp_mmhg: '',
+  blood_glucose_mmol_l: '',
+  cholesterol_mmol_l: '',
+  weight_kg: '',
   sleep_quality: '',
+  sleep_hours: '',
+  snoring: '',
   physical_activity: '',
   social_engagement: '',
+  everyday_function: '',
   mood: '',
   memory_concerns: '',
+  family_history: '',
   additional_notes: '',
 };
 
@@ -97,6 +115,29 @@ const MEMORY_OPTIONS = [
   'Prefer not to say',
 ];
 
+const SNORING_OPTIONS = [
+  'No',
+  'Sometimes',
+  'Often',
+  'Not sure',
+  'Prefer not to say',
+];
+
+const FUNCTION_OPTIONS = [
+  'No change',
+  'A little harder',
+  'Much harder',
+  'Not sure',
+  'Prefer not to say',
+];
+
+const FAMILY_HISTORY_OPTIONS = [
+  'Yes',
+  'No',
+  'Not sure',
+  'Prefer not to say',
+];
+
 type OptionGroupProps = {
   label: string;
   options: string[];
@@ -149,6 +190,32 @@ function OptionGroup({
           );
         })}
       </View>
+    </View>
+  );
+}
+
+function NumberField({
+  label,
+  value,
+  placeholder,
+  onChangeText,
+}: {
+  label: string;
+  value: string;
+  placeholder: string;
+  onChangeText: (value: string) => void;
+}) {
+  return (
+    <View style={[styles.field, styles.measurementField]}>
+      <Text style={styles.label}>{label}</Text>
+      <TextInput
+        value={value}
+        onChangeText={onChangeText}
+        placeholder={placeholder}
+        placeholderTextColor={COLORS.muted}
+        keyboardType="decimal-pad"
+        style={styles.numericInput}
+      />
     </View>
   );
 }
@@ -315,6 +382,33 @@ export default function AdultBaselineScreen() {
       return false;
     }
 
+    const numericFields: {
+      key: keyof BaselineForm;
+      label: string;
+      min: number;
+      max: number;
+    }[] = [
+      { key: 'systolic_bp_mmhg', label: 'Systolic blood pressure', min: 50, max: 300 },
+      { key: 'diastolic_bp_mmhg', label: 'Diastolic blood pressure', min: 30, max: 200 },
+      { key: 'blood_glucose_mmol_l', label: 'Blood glucose', min: 0, max: 60 },
+      { key: 'cholesterol_mmol_l', label: 'Cholesterol', min: 0, max: 60 },
+      { key: 'weight_kg', label: 'Weight', min: 1, max: 500 },
+      { key: 'sleep_hours', label: 'Sleep duration', min: 0, max: 24 },
+    ];
+    const invalidNumber = numericFields.find(({ key, min, max }) => {
+      const value = String(form[key]).trim();
+      if (!value) return false;
+      const parsed = Number(value);
+      return !Number.isFinite(parsed) || parsed < min || parsed > max;
+    });
+    if (invalidNumber) {
+      setFeedback(
+        `Enter a valid ${invalidNumber.label.toLowerCase()} or leave it blank.`
+      );
+      setFeedbackType('error');
+      return false;
+    }
+
     setFeedback('');
     setFeedbackType('');
     return true;
@@ -333,15 +427,34 @@ export default function AdultBaselineScreen() {
       const payload: BaselineForm = {
         health_conditions: form.health_conditions,
         blood_pressure_history: form.blood_pressure_history.trim(),
+        systolic_bp_mmhg: form.systolic_bp_mmhg.trim(),
+        diastolic_bp_mmhg: form.diastolic_bp_mmhg.trim(),
+        blood_glucose_mmol_l: form.blood_glucose_mmol_l.trim(),
+        cholesterol_mmol_l: form.cholesterol_mmol_l.trim(),
+        weight_kg: form.weight_kg.trim(),
         sleep_quality: form.sleep_quality.trim(),
+        sleep_hours: form.sleep_hours.trim(),
+        snoring: form.snoring.trim(),
         physical_activity: form.physical_activity.trim(),
         social_engagement: form.social_engagement.trim(),
+        everyday_function: form.everyday_function.trim(),
         mood: form.mood.trim(),
         memory_concerns: form.memory_concerns.trim(),
+        family_history: form.family_history.trim(),
         additional_notes: form.additional_notes.trim(),
       };
 
-      await saveAdultBaseline(payload);
+      const optionalNumber = (value: string) =>
+        value.trim() ? Number(value) : undefined;
+      await saveAdultBaseline({
+        ...payload,
+        systolic_bp_mmhg: optionalNumber(payload.systolic_bp_mmhg),
+        diastolic_bp_mmhg: optionalNumber(payload.diastolic_bp_mmhg),
+        blood_glucose_mmol_l: optionalNumber(payload.blood_glucose_mmol_l),
+        cholesterol_mmol_l: optionalNumber(payload.cholesterol_mmol_l),
+        weight_kg: optionalNumber(payload.weight_kg),
+        sleep_hours: optionalNumber(payload.sleep_hours),
+      });
 
       setCompleted(true);
       setFeedback('Your baseline assessment has been saved. Continuing to Hearing and Vision...');
@@ -475,6 +588,48 @@ export default function AdultBaselineScreen() {
           </View>
 
           <View style={styles.card}>
+            <Text style={styles.sectionTitle}>Recent measurements (optional)</Text>
+            <Text style={styles.helper}>
+              Enter a value only if you know it. These are stored as self-reported
+              measurements and are not interpreted as a result.
+            </Text>
+            <View style={styles.measurementRow}>
+              <NumberField
+                label="Systolic blood pressure (mmHg)"
+                value={form.systolic_bp_mmhg}
+                placeholder="e.g. 120"
+                onChangeText={(value) => updateField('systolic_bp_mmhg', value)}
+              />
+              <NumberField
+                label="Diastolic blood pressure (mmHg)"
+                value={form.diastolic_bp_mmhg}
+                placeholder="e.g. 80"
+                onChangeText={(value) => updateField('diastolic_bp_mmhg', value)}
+              />
+            </View>
+            <View style={styles.measurementRow}>
+              <NumberField
+                label="Blood glucose (mmol/L)"
+                value={form.blood_glucose_mmol_l}
+                placeholder="Optional"
+                onChangeText={(value) => updateField('blood_glucose_mmol_l', value)}
+              />
+              <NumberField
+                label="Total cholesterol (mmol/L)"
+                value={form.cholesterol_mmol_l}
+                placeholder="Optional"
+                onChangeText={(value) => updateField('cholesterol_mmol_l', value)}
+              />
+            </View>
+            <NumberField
+              label="Weight (kg)"
+              value={form.weight_kg}
+              placeholder="Optional"
+              onChangeText={(value) => updateField('weight_kg', value)}
+            />
+          </View>
+
+          <View style={styles.card}>
             <View style={styles.sectionHeading}>
               <Ionicons
                 name="moon-outline"
@@ -496,6 +651,20 @@ export default function AdultBaselineScreen() {
               }
             />
 
+            <NumberField
+              label="About how many hours do you usually sleep?"
+              value={form.sleep_hours}
+              placeholder="Optional"
+              onChangeText={(value) => updateField('sleep_hours', value)}
+            />
+
+            <OptionGroup
+              label="Do you snore, or has anyone mentioned pauses in your breathing during sleep?"
+              options={SNORING_OPTIONS}
+              value={form.snoring}
+              onSelect={(value) => updateField('snoring', value)}
+            />
+
             <OptionGroup
               label="How would you describe your physical activity?"
               options={ACTIVITY_OPTIONS}
@@ -512,6 +681,13 @@ export default function AdultBaselineScreen() {
               onSelect={(value) =>
                 updateField('social_engagement', value)
               }
+            />
+
+            <OptionGroup
+              label="Have everyday activities become more difficult than usual?"
+              options={FUNCTION_OPTIONS}
+              value={form.everyday_function}
+              onSelect={(value) => updateField('everyday_function', value)}
             />
           </View>
 
@@ -542,6 +718,13 @@ export default function AdultBaselineScreen() {
               onSelect={(value) =>
                 updateField('memory_concerns', value)
               }
+            />
+
+            <OptionGroup
+              label="Is there a known family history of memory or brain health conditions? (optional)"
+              options={FAMILY_HISTORY_OPTIONS}
+              value={form.family_history}
+              onSelect={(value) => updateField('family_history', value)}
             />
           </View>
 
@@ -795,6 +978,26 @@ const styles = StyleSheet.create({
 
   field: {
     marginBottom: 22,
+  },
+
+  measurementRow: {
+    flexDirection: 'row',
+    gap: 12,
+  },
+
+  measurementField: {
+    flex: 1,
+    minWidth: 0,
+  },
+
+  numericInput: {
+    minHeight: 44,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    color: COLORS.text,
+    backgroundColor: '#FFFFFF',
   },
 
   label: {

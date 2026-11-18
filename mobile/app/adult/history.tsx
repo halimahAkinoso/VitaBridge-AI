@@ -34,11 +34,20 @@ type HistoryResponse = {
 const RESPONSE_LABELS: Record<string, string> = {
   health_conditions: 'Health history',
   blood_pressure_history: 'Blood pressure',
+  systolic_bp_mmhg: 'Systolic blood pressure (mmHg)',
+  diastolic_bp_mmhg: 'Diastolic blood pressure (mmHg)',
+  blood_glucose_mmol_l: 'Blood glucose (mmol/L)',
+  cholesterol_mmol_l: 'Total cholesterol (mmol/L)',
+  weight_kg: 'Weight (kg)',
   sleep_quality: 'Sleep quality',
+  sleep_hours: 'Sleep duration (hours)',
+  snoring: 'Snoring or breathing pauses',
   physical_activity: 'Physical activity',
   social_engagement: 'Social engagement',
+  everyday_function: 'Everyday activities',
   mood: 'Mood',
   memory_concerns: 'Memory concerns',
+  family_history: 'Family history',
   additional_notes: 'Additional information',
   hearing_difficulty: 'Difficulty hearing conversations',
   hearing_environment: 'Difficulty hearing in background noise',
@@ -46,6 +55,7 @@ const RESPONSE_LABELS: Record<string, string> = {
   vision_difficulty: 'Difficulty seeing clearly',
   vision_reading: 'Difficulty reading',
   vision_support: 'Vision support',
+  mood_score: 'Mood check-in (1–5)',
 };
 
 function formatDate(value?: string | null): string {

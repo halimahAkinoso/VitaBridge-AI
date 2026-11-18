@@ -105,6 +105,13 @@ export default function DoctorDashboard() {
           onPress={() => router.push('/doctor/child-reviews')}
         />
 
+        <DashboardCard
+          title="Adult Baseline Reviews"
+          description="Review adults' self-reported health and sensory history, then record your own recommendation."
+          icon="account-heart-outline"
+          onPress={() => router.push('/doctor/adult-reviews')}
+        />
+
         {/* REFERRALS */}
         <Text style={styles.sectionTitle}>
           Referral Management

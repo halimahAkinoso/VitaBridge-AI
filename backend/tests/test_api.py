@@ -322,11 +322,20 @@ def test_adult_history_includes_saved_baseline_and_hearing_vision():
         json={
             "health_conditions": ["None of the above"],
             "blood_pressure_history": "Normal",
+            "systolic_bp_mmhg": 121,
+            "diastolic_bp_mmhg": 79,
+            "blood_glucose_mmol_l": 5.2,
+            "cholesterol_mmol_l": 4.1,
+            "weight_kg": 68.5,
             "sleep_quality": "Good",
+            "sleep_hours": 7.5,
+            "snoring": "Not sure",
             "physical_activity": "Moderately active",
             "social_engagement": "Often",
+            "everyday_function": "No change",
             "mood": "Good",
             "memory_concerns": "No concerns",
+            "family_history": "Not sure",
         },
     )
     assert baseline.status_code == 200, baseline.text
@@ -372,6 +381,10 @@ def test_adult_history_includes_saved_baseline_and_hearing_vision():
     assert assessments["adult_health_assessment"]["responses"][
         "sleep_quality"
     ] == "Good"
+    assert assessments["adult_health_assessment"]["responses"][
+        "blood_glucose_mmol_l"
+    ] == 5.2
+    assert "additional_notes" not in assessments["adult_health_assessment"]["responses"]
     hearing_history = [
         item
         for item in data["assessments"]
@@ -382,3 +395,343 @@ def test_adult_history_includes_saved_baseline_and_hearing_vision():
     assert hearing_history[0]["responses"]["hearing_difficulty"] == "Often"
     assert hearing_history[1]["completed_at"] == "2026-01-02T03:04:05Z"
     assert hearing_history[1]["responses"]["vision_difficulty"] == "Sometimes"
+
+
+def test_adult_prevention_agent_uses_real_data_and_records_check_ins():
+    registration = client.post(
+        "/api/auth/register",
+        json={
+            "name": "Synthetic Prevention Adult",
+            "email": "adult.prevention@example.com",
+            "password": PASSWORD,
+            "role": "adult",
+        },
+    )
+    assert registration.status_code == 201, registration.text
+    headers = {
+        "Authorization": f"Bearer {registration.json()['token']}",
+    }
+
+    profile = client.put(
+        "/api/screening/adult/profile",
+        headers=headers,
+        json={
+            "name": "Synthetic Prevention Adult",
+            "dob": date(date.today().year - 60, 1, 1).isoformat(),
+            "sex": "Prefer not to say",
+            "language": "en",
+        },
+    )
+    assert profile.status_code == 200, profile.text
+
+    overview = client.get("/api/agent/overview", headers=headers)
+    assert overview.status_code == 200, overview.text
+    data = overview.json()
+    assert data["assessment_status"]["baseline"] == "not_started"
+    assert data["assessment_status"]["cognitive"] == "approval_pending"
+    assert data["cognitive_screening"]["available"] is False
+    assert "no cognitive score" in data["cognitive_screening"]["message"].lower()
+    assert len(data["prevention_plan"]) == 6
+    assert data["next_best_action"]["route"] == "/adult/screening/baseline"
+
+    empty_checkin = client.post(
+        "/api/agent/check-in",
+        headers=headers,
+        json={},
+    )
+    assert empty_checkin.status_code == 422
+
+    first = client.post(
+        "/api/agent/check-in",
+        headers=headers,
+        json={"sleep_hours": 6.5, "mood_score": 3},
+    )
+    assert first.status_code == 200, first.text
+    updated = client.post(
+        "/api/agent/check-in",
+        headers=headers,
+        json={"mood_score": 4},
+    )
+    assert updated.status_code == 200, updated.text
+
+    check_ins = client.get("/api/agent/check-ins", headers=headers)
+    assert check_ins.status_code == 200, check_ins.text
+    assert len(check_ins.json()["check_ins"]) == 1
+    assert check_ins.json()["check_ins"][0]["sleep_hours"] == 6.5
+    assert check_ins.json()["check_ins"][0]["mood_score"] == 4
+
+    history = client.get(
+        "/api/screening/adult/history",
+        headers=headers,
+    )
+    assert history.status_code == 200, history.text
+    assert any(
+        item["assessment"] == "daily_checkin"
+        for item in history.json()["assessments"]
+    )
+
+    cognitive_answer = client.post(
+        "/api/agent/chat",
+        headers=headers,
+        json={"message": "What is my cognitive score?"},
+    )
+    assert cognitive_answer.status_code == 200, cognitive_answer.text
+    assert "no approved cognitive screening result" in cognitive_answer.json()["reply"].lower()
+
+    urgent_answer = client.post(
+        "/api/agent/chat",
+        headers=headers,
+        json={"message": "I am worried about self-harm"},
+    )
+    assert urgent_answer.status_code == 200, urgent_answer.text
+    assert urgent_answer.json()["urgent_human_support"] is True
+    assert client.get("/api/agent/overview").status_code == 401
+
+
+def test_passport_and_notifications_are_account_scoped():
+    first = client.post(
+        "/api/auth/register",
+        json={
+            "name": "Synthetic Passport Adult",
+            "email": "adult.passport@example.com",
+            "password": PASSWORD,
+            "role": "adult",
+        },
+    )
+    second = client.post(
+        "/api/auth/register",
+        json={
+            "name": "Synthetic Other Adult",
+            "email": "adult.passport.other@example.com",
+            "password": PASSWORD,
+            "role": "adult",
+        },
+    )
+    assert first.status_code == 201, first.text
+    assert second.status_code == 201, second.text
+    token = first.json()["token"]
+    headers = {"Authorization": f"Bearer {token}"}
+    profile = client.put(
+        "/api/screening/adult/profile",
+        headers=headers,
+        json={
+            "name": "Synthetic Passport Adult",
+            "dob": date(date.today().year - 60, 1, 1).isoformat(),
+            "sex": "Prefer not to say",
+            "language": "en",
+        },
+    )
+    assert profile.status_code == 200, profile.text
+    person_id = profile.json()["profile"]["id"]
+
+    passport = client.get(
+        f"/api/passport/{person_id}",
+        headers=headers,
+    )
+    assert passport.status_code == 200, passport.text
+    assert passport.json()["member"]["name"] == "Synthetic Passport Adult"
+    assert "Cognitive screening (approved instrument pending)" in passport.json()["member"]["due"]
+    own_family = client.get(
+        "/api/passport/family/me",
+        headers=headers,
+    )
+    assert own_family.status_code == 200, own_family.text
+    assert [member["name"] for member in own_family.json()["family"]] == [
+        "Synthetic Passport Adult"
+    ]
+
+    notifications = client.get(
+        f"/api/notifications/{person_id}",
+        headers=headers,
+    )
+    assert notifications.status_code == 200, notifications.text
+    assert any(
+        item["id"] == "adult-baseline"
+        for item in notifications.json()["notifications"]
+    )
+
+    other_owner_id = second.json()["user"]["id"]
+    assert client.get(
+        f"/api/passport/family/{other_owner_id}",
+        headers=headers,
+    ).status_code == 403
+    assert client.get(
+        f"/api/passport/{person_id}"
+    ).status_code == 401
+    other_headers = {
+        "Authorization": f"Bearer {second.json()['token']}",
+    }
+    other_family = client.get(
+        "/api/passport/family/me",
+        headers=other_headers,
+    )
+    assert other_family.status_code == 200, other_family.text
+    assert client.get(
+        f"/api/passport/{person_id}",
+        headers=other_headers,
+    ).status_code == 404
+
+
+def test_arabic_adult_profile_receives_nura_guidance_in_arabic():
+    registration = client.post(
+        "/api/auth/register",
+        json={
+            "name": "Synthetic Arabic Adult",
+            "email": "adult.nura.arabic@example.com",
+            "password": PASSWORD,
+            "role": "adult",
+        },
+    )
+    assert registration.status_code == 201, registration.text
+    headers = {
+        "Authorization": f"Bearer {registration.json()['token']}",
+    }
+    profile = client.put(
+        "/api/screening/adult/profile",
+        headers=headers,
+        json={
+            "name": "Synthetic Arabic Adult",
+            "dob": date(date.today().year - 60, 1, 1).isoformat(),
+            "sex": "Prefer not to say",
+            "language": "ar",
+        },
+    )
+    assert profile.status_code == 200, profile.text
+
+    overview = client.get("/api/agent/overview", headers=headers)
+    assert overview.status_code == 200, overview.text
+    assert overview.json()["language"] == "ar"
+    assert "أكمل" in overview.json()["next_best_action"]["detail"]
+
+    answer = client.post(
+        "/api/agent/chat",
+        headers=headers,
+        json={"message": "ما خطوتي التالية؟"},
+    )
+    assert answer.status_code == 200, answer.text
+    assert "مرحباً" in answer.json()["reply"]
+
+    urgent_answer = client.post(
+        "/api/agent/chat",
+        headers=headers,
+        json={"message": "أفكر بالانتحار"},
+    )
+    assert urgent_answer.status_code == 200, urgent_answer.text
+    assert urgent_answer.json()["urgent_human_support"] is True
+    assert "خدمات الطوارئ" in urgent_answer.json()["reply"]
+
+
+def test_adult_clinician_review_requires_clinician_and_creates_referral():
+    registration = client.post(
+        "/api/auth/register",
+        json={
+            "name": "Synthetic Review Adult",
+            "email": "adult.review@example.com",
+            "password": PASSWORD,
+            "role": "adult",
+        },
+    )
+    assert registration.status_code == 201, registration.text
+    headers = {
+        "Authorization": f"Bearer {registration.json()['token']}",
+    }
+    profile = client.put(
+        "/api/screening/adult/profile",
+        headers=headers,
+        json={
+            "name": "Synthetic Review Adult",
+            "dob": date(date.today().year - 60, 1, 1).isoformat(),
+            "sex": "Prefer not to say",
+            "language": "en",
+        },
+    )
+    assert profile.status_code == 200, profile.text
+    baseline = client.post(
+        "/api/screening/adult/baseline",
+        headers=headers,
+        json={
+            "health_conditions": ["Prefer not to say"],
+            "blood_pressure_history": "Prefer not to say",
+            "sleep_quality": "Fair",
+            "physical_activity": "Lightly active",
+            "social_engagement": "Sometimes",
+            "mood": "Good",
+            "memory_concerns": "No concerns",
+        },
+    )
+    assert baseline.status_code == 200, baseline.text
+
+    db = SessionLocal()
+    try:
+        clinician = User(
+            name="Synthetic Clinician",
+            email="clinician.adult.review@example.com",
+            role="doctor",
+            password_hash=hash_password(PASSWORD),
+        )
+        db.add(clinician)
+        db.commit()
+    finally:
+        db.close()
+    clinician_login = client.post(
+        "/api/auth/login",
+        json={
+            "email": "clinician.adult.review@example.com",
+            "password": PASSWORD,
+        },
+    )
+    assert clinician_login.status_code == 200
+    clinician_headers = {
+        "Authorization": f"Bearer {clinician_login.json()['token']}",
+    }
+    person_id = profile.json()["profile"]["id"]
+
+    assert client.get(
+        "/api/screening/clinician/adult-queue",
+        headers=headers,
+    ).status_code == 403
+    queue = client.get(
+        "/api/screening/clinician/adult-queue",
+        headers=clinician_headers,
+    )
+    assert queue.status_code == 200, queue.text
+    assert any(item["person_id"] == person_id for item in queue.json()["adults"])
+
+    review_payload = {
+        "decision": "REFER",
+        "risk": "MODERATE",
+        "note": "Synthetic clinician review note.",
+        "next_action": "Discuss follow-up with primary care.",
+    }
+    missing_specialty = client.post(
+        f"/api/screening/clinician/adult-review/{person_id}",
+        headers=clinician_headers,
+        json=review_payload,
+    )
+    assert missing_specialty.status_code == 422
+
+    review = client.post(
+        f"/api/screening/clinician/adult-review/{person_id}",
+        headers=clinician_headers,
+        json={**review_payload, "referral_specialty": "Primary Care"},
+    )
+    assert review.status_code == 200, review.text
+    assert review.json()["review"]["risk"] == "MODERATE"
+    assert review.json()["referral"]["status"] == "OPEN"
+
+    history = client.get(
+        "/api/screening/adult/history",
+        headers=headers,
+    )
+    assert history.status_code == 200, history.text
+    assert any(
+        item["assessment"] == "adult_clinical_review"
+        and item["responses"]["reviewed_by"] == "Synthetic Clinician"
+        for item in history.json()["assessments"]
+    )
+    referrals = client.get("/api/screening/referrals", headers=headers)
+    assert referrals.status_code == 200
+    assert any(
+        item["id"] == review.json()["referral"]["id"]
+        for item in referrals.json()["referrals"]
+    )

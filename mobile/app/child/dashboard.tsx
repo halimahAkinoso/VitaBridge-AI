@@ -261,6 +261,36 @@ export default function ParentDashboard() {
         </Text>
       </Pressable>
 
+      <Pressable
+        style={({ pressed }) => [
+          styles.card,
+          pressed && styles.pressedCard,
+        ]}
+        onPress={() => router.push('/passport')}
+        accessibilityRole="button"
+        accessibilityLabel="Open family health passport"
+      >
+        <View style={styles.cardHeader}>
+          <MaterialCommunityIcons
+            name="passport"
+            size={35}
+            color={COLORS.teal}
+          />
+
+          <MaterialCommunityIcons
+            name="chevron-right"
+            size={27}
+            color={COLORS.muted}
+          />
+        </View>
+
+        <Text style={styles.cardTitle}>Family Health Passport</Text>
+        <Text style={styles.cardText}>
+          Review recorded preventive care and follow-up for profiles linked to your account.
+        </Text>
+        <Text style={styles.cardAction}>View Family Passport</Text>
+      </Pressable>
+
       {/* REFRESH PROFILE */}
       <Pressable
         style={styles.refreshButton}

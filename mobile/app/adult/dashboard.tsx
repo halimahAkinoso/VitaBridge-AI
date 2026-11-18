@@ -13,7 +13,11 @@ import { router } from 'expo-router';
 
 import { Screen } from '../../components/Screen';
 import { COLORS, SHADOW } from '../../src/theme';
-import { getAdultProfile, getCurrentUser } from '../../src/api';
+import {
+  getAdultProfile,
+  getCurrentUser,
+  getPreventionOverview,
+} from '../../src/api';
 import { useAuth } from '../../src/auth/AuthContext';
 
 type Profile = {
@@ -23,19 +27,54 @@ type Profile = {
   nationality?: string;
 };
 
+type PreventionOverview = {
+  next_best_action: {
+    title: string;
+    detail: string;
+    route: string;
+  };
+  today_check_in: {
+    sleep_hours?: number | null;
+    mood_score?: number | null;
+  } | null;
+  prevention_plan: {
+    domain: string;
+    action: string;
+    basis: string;
+    status: string;
+  }[];
+  self_reported_change_observations: {
+    measure: string;
+    previous_period_average: number;
+    recent_period_average: number;
+    interpretation: string;
+  }[];
+  cognitive_screening: {
+    available: boolean;
+    message: string;
+  };
+  latest_clinician_review?: {
+    decision: string;
+    risk: string;
+    recommendation: string;
+  } | null;
+};
+
 export default function AdultDashboard() {
   const { user } = useAuth();
   const [profile, setProfile] = useState<Profile>({});
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState('');
+  const [journey, setJourney] = useState<PreventionOverview | null>(null);
+  const [journeyError, setJourneyError] = useState('');
 
   // Load the adult's saved profile and authenticated user information.
   const loadProfile = async () => {
     try {
       setError('');
 
-      const [profileResult, userResult] = await Promise.all([
+      const [profileResult, userResult, journeyResult] = await Promise.all([
         getAdultProfile().catch((err) => {
           console.error('Adult profile request failed:', err?.response?.data || err);
           return null;
@@ -44,10 +83,20 @@ export default function AdultDashboard() {
           console.error('Current user request failed:', err?.response?.data || err);
           return null;
         }),
+        getPreventionOverview().catch((err) => {
+          console.error('Adult prevention overview failed:', err?.response?.data || err);
+          setJourneyError(
+            err?.response?.data?.detail ||
+              'Unable to load your prevention plan. Pull down to retry.'
+          );
+          return null;
+        }),
       ]);
 
       const profileResponse = profileResult?.data || {};
       const userResponse = userResult?.data || {};
+      setJourney(journeyResult?.data || null);
+      if (journeyResult) setJourneyError('');
 
       const adultProfile =
         profileResponse.profile ||
@@ -263,6 +312,56 @@ export default function AdultDashboard() {
           </View>
         </View>
 
+        <View style={styles.nextActionCard}>
+          <Text style={styles.nextActionLabel}>YOUR NEXT BEST ACTION</Text>
+          {journey ? (
+            <>
+              <Text style={styles.nextActionTitle}>
+                {journey.next_best_action.title}
+              </Text>
+              <Text style={styles.nextActionText}>
+                {journey.next_best_action.detail}
+              </Text>
+              {journey.latest_clinician_review ? (
+                <Text style={styles.clinicianStatus}>
+                  Clinician review: {journey.latest_clinician_review.decision.replace('_', ' ')}
+                  {journey.latest_clinician_review.risk !== 'NOT_ASSESSED'
+                    ? ` · Clinician-recorded level: ${journey.latest_clinician_review.risk}`
+                    : ' · No risk level was recorded.'}
+                </Text>
+              ) : null}
+              <Pressable
+                style={styles.nextActionButton}
+                onPress={() => navigate(journey.next_best_action.route)}
+              >
+                <Text style={styles.nextActionButtonText}>Take this step</Text>
+              </Pressable>
+            </>
+          ) : (
+            <Text style={styles.nextActionText}>
+              {journeyError || 'Loading your saved prevention steps...'}
+            </Text>
+          )}
+        </View>
+
+        <Pressable
+          style={styles.checkInCard}
+          onPress={() => navigate('/adult/check-in')}
+        >
+          <View style={styles.checkInIcon}>
+            <Text style={styles.iconText}>☀</Text>
+          </View>
+          <View style={styles.checkInContent}>
+            <Text style={styles.checkInTitle}>30-second morning check-in</Text>
+            <Text style={styles.checkInDescription}>
+              {journey?.today_check_in
+                ? 'Today is recorded. You can update your sleep and mood.'
+                : 'How did you sleep, and how is your mood today?'}
+            </Text>
+          </View>
+          <Text style={styles.arrow}>›</Text>
+        </Pressable>
+
         {/* Screening section */}
         <View style={styles.sectionHeader}>
           <Text style={styles.sectionTitle}>
@@ -295,10 +394,46 @@ export default function AdultDashboard() {
         <ActionCard
           icon="🧠"
           title="Cognitive Screening"
-          description="An approved instrument, permissions, and clinical authorization are required before cognitive screening can be enabled."
+          description={
+            journey?.cognitive_screening.message ||
+            'An approved instrument, permissions, and clinical authorization are required before cognitive screening can be enabled.'
+          }
           buttonText="Approval Pending"
           disabled
         />
+
+        {journey ? (
+          <>
+            <View style={styles.sectionHeader}>
+              <Text style={styles.sectionTitle}>Your prevention plan</Text>
+              <Text style={styles.sectionSubtitle}>
+                Practical steps across six health domains, based on the information you have chosen to share.
+              </Text>
+            </View>
+            {journey.prevention_plan.map((item) => (
+              <View key={item.domain} style={styles.planCard}>
+                <Text style={styles.planDomain}>{item.domain}</Text>
+                <Text style={styles.planAction}>{item.action}</Text>
+                <Text style={styles.planBasis}>{item.basis}</Text>
+              </View>
+            ))}
+
+            {journey.self_reported_change_observations.length > 0 ? (
+              <View style={styles.trendCard}>
+                <Text style={styles.sectionTitle}>Your check-in trends</Text>
+                {journey.self_reported_change_observations.map((observation) => (
+                  <Text key={observation.measure} style={styles.trendText}>
+                    {observation.measure}: {observation.previous_period_average} →
+                    {' '}{observation.recent_period_average}
+                  </Text>
+                ))}
+                <Text style={styles.planBasis}>
+                  These are descriptive self-reports, not clinical change or risk scores.
+                </Text>
+              </View>
+            ) : null}
+          </>
+        ) : null}
 
         {/* Records and support */}
         <View style={styles.sectionHeader}>
@@ -306,6 +441,14 @@ export default function AdultDashboard() {
             Your Records and Support
           </Text>
         </View>
+
+        <ActionCard
+          icon="🧭"
+          title="Family Health Passport"
+          description="See recorded care, available next steps, and follow-up for profiles linked to your account."
+          buttonText="Open Passport"
+          onPress={() => navigate('/passport')}
+        />
 
         <ActionCard
           icon="📊"
@@ -464,6 +607,83 @@ const styles = StyleSheet.create({
     marginBottom: 25,
     ...SHADOW,
   },
+  nextActionCard: {
+    backgroundColor: '#E8F4F2',
+    borderRadius: 16,
+    padding: 17,
+    marginBottom: 14,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  nextActionLabel: {
+    color: COLORS.teal,
+    fontSize: 9,
+    fontWeight: '900',
+    letterSpacing: 0.9,
+  },
+  nextActionTitle: {
+    color: COLORS.text,
+    fontSize: 16,
+    fontWeight: '900',
+    marginTop: 7,
+  },
+  nextActionText: {
+    color: COLORS.muted,
+    fontSize: 12,
+    lineHeight: 18,
+    marginTop: 5,
+  },
+  clinicianStatus: {
+    color: COLORS.blue,
+    fontSize: 10,
+    lineHeight: 15,
+    fontWeight: '700',
+    marginTop: 8,
+  },
+  nextActionButton: {
+    alignSelf: 'flex-start',
+    backgroundColor: COLORS.teal,
+    borderRadius: 9,
+    paddingHorizontal: 13,
+    paddingVertical: 9,
+    marginTop: 12,
+  },
+  nextActionButtonText: { color: '#FFFFFF', fontSize: 11, fontWeight: '800' },
+  checkInCard: {
+    backgroundColor: COLORS.surface,
+    borderRadius: 15,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    padding: 14,
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 22,
+  },
+  checkInIcon: {
+    width: 43,
+    height: 43,
+    borderRadius: 13,
+    backgroundColor: '#FFF5E7',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 11,
+  },
+  checkInContent: { flex: 1 },
+  checkInTitle: { color: COLORS.text, fontSize: 13, fontWeight: '800' },
+  checkInDescription: { color: COLORS.muted, fontSize: 11, lineHeight: 16, marginTop: 4 },
+  planCard: {
+    backgroundColor: COLORS.surface,
+    borderRadius: 13,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    padding: 14,
+    marginBottom: 10,
+  },
+  planDomain: { color: COLORS.teal, fontSize: 12, fontWeight: '900' },
+  planAction: { color: COLORS.text, fontSize: 12, lineHeight: 18, fontWeight: '700', marginTop: 5 },
+  planBasis: { color: COLORS.muted, fontSize: 10, lineHeight: 15, marginTop: 5 },
+  trendCard: { backgroundColor: COLORS.surface, borderRadius: 14, padding: 15, marginBottom: 15, borderWidth: 1, borderColor: COLORS.border },
+  trendText: { color: COLORS.text, fontSize: 12, fontWeight: '700', marginTop: 9 },
 
   profileTop: {
     flexDirection: 'row',

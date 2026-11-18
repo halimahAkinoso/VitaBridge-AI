@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import (
     Column, Integer, String, Float, DateTime, Boolean,
-    ForeignKey, JSON, Text
+    ForeignKey, JSON, Text, UniqueConstraint
 )
 from app.core.database import Base
 
@@ -84,3 +84,35 @@ class Notification(Base):
     barrier = Column(String(100), nullable=True)
     is_read = Column(Boolean, default=False)
     created_at = Column(DateTime(timezone=True), default=utc_now)
+
+
+class WellbeingCheckIn(Base):
+    __tablename__ = "wellbeing_checkins"
+    __table_args__ = (
+        UniqueConstraint(
+            "person_id",
+            "local_date",
+            name="uq_wellbeing_checkin_person_date",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    person_id = Column(Integer, ForeignKey("persons.id"), nullable=False, index=True)
+    local_date = Column(String(10), nullable=False)
+    sleep_hours = Column(Float, nullable=True)
+    mood_score = Column(Integer, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
+
+
+class AdultClinicalReview(Base):
+    __tablename__ = "adult_clinical_reviews"
+
+    id = Column(Integer, primary_key=True, index=True)
+    person_id = Column(Integer, ForeignKey("persons.id"), nullable=False, index=True)
+    reviewer_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    decision = Column(String(30), nullable=False)
+    risk = Column(String(30), nullable=False, default="NOT_ASSESSED")
+    note = Column(Text, nullable=False)
+    next_action = Column(String(255), nullable=False)
+    referral_specialty = Column(String(100), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)

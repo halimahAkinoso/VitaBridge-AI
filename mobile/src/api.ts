@@ -106,6 +106,21 @@ export const getScreeningInstruments = () =>
 export const getChildClinicianQueue = () =>
   api.get('/screening/clinician/child-queue');
 
+export const getAdultClinicianQueue = () =>
+  api.get('/screening/clinician/adult-queue');
+
+export const submitAdultClinicalReview = (
+  personId: number,
+  payload: {
+    decision: 'MONITOR' | 'FOLLOW_UP' | 'REFER';
+    risk: 'NOT_ASSESSED' | 'LOW' | 'MODERATE' | 'ELEVATED';
+    note: string;
+    next_action: string;
+    referral_specialty?: string;
+  }
+) =>
+  api.post(`/screening/clinician/adult-review/${personId}`, payload);
+
 export const reviewChildScreening = (
   screeningId: number,
   payload: {
@@ -170,11 +185,20 @@ export const saveAdultProfile = (payload: {
 export interface AdultBaselinePayload {
   health_conditions: string[];
   blood_pressure_history: string;
+  systolic_bp_mmhg?: number;
+  diastolic_bp_mmhg?: number;
+  blood_glucose_mmol_l?: number;
+  cholesterol_mmol_l?: number;
+  weight_kg?: number;
   sleep_quality: string;
+  sleep_hours?: number;
+  snoring?: string;
   physical_activity: string;
   social_engagement: string;
+  everyday_function?: string;
   mood: string;
   memory_concerns: string;
+  family_history?: string;
   additional_notes?: string;
 }
 
@@ -187,11 +211,20 @@ export const saveAdultBaseline = (
 // AI ASSISTANT
 // --------------------------------------
 
-export const agentChat = (
-  message: string,
-  context: Record<string, unknown>
-) =>
-  api.post('/agent/chat', { message, context });
+export const agentChat = (message: string) =>
+  api.post('/agent/chat', { message });
+
+export const getPreventionOverview = () =>
+  api.get('/agent/overview');
+
+export const getFamilyHealthPassport = () =>
+  api.get('/passport/family/me');
+
+export const saveDailyCheckIn = (payload: {
+  sleep_hours?: number;
+  mood_score?: number;
+}) =>
+  api.post('/agent/check-in', payload);
 
 // --------------------------------------
 // DOCTOR / PRACTITIONER

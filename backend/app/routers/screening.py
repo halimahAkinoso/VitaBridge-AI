@@ -6,10 +6,17 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from app.core.database import get_db
-from app.models import User, Person, Screening, Referral
+from app.models import (
+    AdultClinicalReview,
+    User,
+    Person,
+    Screening,
+    Referral,
+    WellbeingCheckIn,
+)
 from app.routers.users import get_current_user
 from app.services.instrument_registry import list_instruments
 
@@ -128,11 +135,20 @@ class AdultBaselineRequest(BaseModel):
     health_conditions: list[str] = Field(default_factory=list)
 
     blood_pressure_history: str = Field(min_length=1, max_length=100)
+    systolic_bp_mmhg: Optional[float] = Field(default=None, ge=50, le=300)
+    diastolic_bp_mmhg: Optional[float] = Field(default=None, ge=30, le=200)
+    blood_glucose_mmol_l: Optional[float] = Field(default=None, ge=0, le=60)
+    cholesterol_mmol_l: Optional[float] = Field(default=None, ge=0, le=60)
+    weight_kg: Optional[float] = Field(default=None, ge=1, le=500)
     sleep_quality: str = Field(min_length=1, max_length=100)
+    sleep_hours: Optional[float] = Field(default=None, ge=0, le=24)
+    snoring: Optional[str] = Field(default=None, max_length=50)
     physical_activity: str = Field(min_length=1, max_length=100)
     social_engagement: str = Field(min_length=1, max_length=100)
+    everyday_function: Optional[str] = Field(default=None, max_length=100)
     mood: str = Field(min_length=1, max_length=100)
     memory_concerns: str = Field(min_length=1, max_length=150)
+    family_history: Optional[str] = Field(default=None, max_length=100)
 
     additional_notes: str = Field(
         default="",
@@ -149,6 +165,15 @@ class AdultBaselineRequest(BaseModel):
 class AdultHearingVisionRequest(BaseModel):
     responses: dict[str, str] = Field(default_factory=dict)
     completed_at: Optional[str] = Field(default=None, max_length=50)
+
+
+class AdultClinicalReviewRequest(BaseModel):
+    decision: Literal["MONITOR", "FOLLOW_UP", "REFER"]
+    risk: Literal["NOT_ASSESSED", "LOW", "MODERATE", "ELEVATED"] = "NOT_ASSESSED"
+    note: str = Field(min_length=3, max_length=2000)
+    next_action: str = Field(min_length=3, max_length=255)
+    referral_specialty: Optional[str] = Field(default=None, max_length=100)
+
 
 # =========================================================
 # CHILD CLINICIAN REVIEW REQUEST
@@ -657,7 +682,7 @@ def append_adult_assessment_history(
                 else {
                     key: value
                     for key, value in legacy.items()
-                    if key != "completed_at"
+                    if key != "completed_at" and value is not None and value != ""
                 }
             )
             history.append(
@@ -730,7 +755,7 @@ def save_adult_baseline(
         {
             key: value
             for key, value in assessment.items()
-            if key != "completed_at"
+            if key != "completed_at" and value is not None and value != ""
         },
         assessment["completed_at"],
     )
@@ -863,7 +888,7 @@ def adult_screening_history(
                 else {
                     key: value
                     for key, value in assessment.items()
-                    if key != "completed_at"
+                    if key != "completed_at" and value is not None and value != ""
                 }
             )
             assessments.append(
@@ -910,6 +935,65 @@ def adult_screening_history(
             }
         )
 
+    check_ins = (
+        db.query(WellbeingCheckIn)
+        .filter(WellbeingCheckIn.person_id == person.id)
+        .order_by(WellbeingCheckIn.local_date.desc())
+        .all()
+    )
+    for check_in in check_ins:
+        responses = {}
+        if check_in.sleep_hours is not None:
+            responses["sleep_hours"] = check_in.sleep_hours
+        if check_in.mood_score is not None:
+            responses["mood_score"] = check_in.mood_score
+        assessments.append(
+            {
+                "id": f"check-in-{check_in.id}",
+                "assessment": "daily_checkin",
+                "title": "Daily wellbeing check-in",
+                "completed_at": (
+                    check_in.created_at.isoformat()
+                    if check_in.created_at
+                    else check_in.local_date
+                ),
+                "responses": responses,
+                "status": "RECORDED",
+                "clinical_score_generated": False,
+            }
+        )
+
+    clinical_reviews = (
+        db.query(AdultClinicalReview, User.name)
+        .join(User, AdultClinicalReview.reviewer_id == User.id)
+        .filter(AdultClinicalReview.person_id == person.id)
+        .order_by(AdultClinicalReview.created_at.desc())
+        .all()
+    )
+    for review, reviewer_name in clinical_reviews:
+        assessments.append(
+            {
+                "id": f"clinical-review-{review.id}",
+                "assessment": "adult_clinical_review",
+                "title": "Clinician review and recommendations",
+                "completed_at": (
+                    review.created_at.isoformat()
+                    if review.created_at
+                    else None
+                ),
+                "responses": {
+                    "decision": review.decision,
+                    "clinician_assigned_risk": review.risk,
+                    "recommendation": review.next_action,
+                    "clinician_note": review.note,
+                    "reviewed_by": reviewer_name,
+                    "referral_specialty": review.referral_specialty,
+                },
+                "status": "CLINICIAN_REVIEWED",
+                "clinical_score_generated": False,
+            }
+        )
+
     assessments.sort(
         key=lambda item: item["completed_at"] or "",
         reverse=True,
@@ -920,6 +1004,150 @@ def adult_screening_history(
         "person_name": person.name,
         "assessment_count": len(assessments),
         "assessments": assessments,
+    }
+
+
+# =========================================================
+# ADULT CLINICAL REVIEW
+# =========================================================
+
+@router.get("/clinician/adult-queue")
+def adult_clinician_queue(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    require_clinician(current_user)
+    people = (
+        db.query(Person)
+        .filter(Person.type == "adult")
+        .order_by(Person.created_at.asc())
+        .all()
+    )
+    queue = []
+    for person in people:
+        baseline = person.baseline or {}
+        adult_assessment = baseline.get("adult_health_assessment")
+        sensory_assessment = baseline.get("adult_hearing_vision")
+        if not adult_assessment and not sensory_assessment:
+            continue
+
+        latest_review = (
+            db.query(AdultClinicalReview)
+            .filter(AdultClinicalReview.person_id == person.id)
+            .order_by(AdultClinicalReview.created_at.desc())
+            .first()
+        )
+        queue.append(
+            {
+                "person_id": person.id,
+                "name": person.name,
+                "dob": person.dob,
+                "language": person.language,
+                "baseline": adult_assessment or {},
+                "hearing_vision": sensory_assessment or {},
+                "latest_review": (
+                    {
+                        "decision": latest_review.decision,
+                        "risk": latest_review.risk,
+                        "note": latest_review.note,
+                        "next_action": latest_review.next_action,
+                        "created_at": (
+                            latest_review.created_at.isoformat()
+                            if latest_review.created_at
+                            else None
+                        ),
+                    }
+                    if latest_review
+                    else None
+                ),
+            }
+        )
+    return {
+        "adults": queue,
+        "count": len(queue),
+        "disclaimer": "Review self-reported information clinically. The system does not generate cognitive scores or risk classifications.",
+    }
+
+
+@router.post("/clinician/adult-review/{person_id}")
+def create_adult_clinical_review(
+    person_id: int,
+    payload: AdultClinicalReviewRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    require_clinician(current_user)
+    person = (
+        db.query(Person)
+        .filter(Person.id == person_id, Person.type == "adult")
+        .first()
+    )
+    if not person:
+        raise HTTPException(
+            status_code=404,
+            detail="Adult profile not found.",
+        )
+    if payload.decision == "REFER" and not payload.referral_specialty:
+        raise HTTPException(
+            status_code=422,
+            detail="A referral specialty is required for a referral.",
+        )
+
+    review = AdultClinicalReview(
+        person_id=person.id,
+        reviewer_id=current_user.id,
+        decision=payload.decision,
+        risk=payload.risk,
+        note=payload.note.strip(),
+        next_action=payload.next_action.strip(),
+        referral_specialty=payload.referral_specialty,
+    )
+    db.add(review)
+    referral = None
+    if payload.decision == "REFER":
+        referral = Referral(
+            person_id=person.id,
+            specialty=payload.referral_specialty,
+            reason=payload.note.strip(),
+            status="OPEN",
+        )
+        db.add(referral)
+
+    try:
+        db.commit()
+        db.refresh(review)
+        if referral:
+            db.refresh(referral)
+    except SQLAlchemyError as error:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail="Unable to save the clinician review.",
+        ) from error
+
+    return {
+        "success": True,
+        "review": {
+            "id": review.id,
+            "decision": review.decision,
+            "risk": review.risk,
+            "note": review.note,
+            "next_action": review.next_action,
+            "created_at": (
+                review.created_at.isoformat()
+                if review.created_at
+                else None
+            ),
+        },
+        "referral": (
+            {
+                "id": referral.id,
+                "specialty": referral.specialty,
+                "status": referral.status,
+            }
+            if referral
+            else None
+        ),
     }
 
 
