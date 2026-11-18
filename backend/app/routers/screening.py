@@ -168,7 +168,13 @@ class AdultHearingVisionRequest(BaseModel):
 
 
 class AdultClinicalReviewRequest(BaseModel):
-    decision: Literal["MONITOR", "FOLLOW_UP", "REFER"]
+    decision: Literal[
+        "WATCH",
+        "ACT",
+        "REFER",
+        "MONITOR",
+        "FOLLOW_UP",
+    ]
     risk: Literal["NOT_ASSESSED", "LOW", "MODERATE", "ELEVATED"] = "NOT_ASSESSED"
     note: str = Field(min_length=3, max_length=2000)
     next_action: str = Field(min_length=3, max_length=255)

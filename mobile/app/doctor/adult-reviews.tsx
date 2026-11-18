@@ -35,7 +35,7 @@ type AdultCase = {
   } | null;
 };
 
-const DECISIONS = ['MONITOR', 'FOLLOW_UP', 'REFER'] as const;
+const DECISIONS = ['WATCH', 'ACT', 'REFER'] as const;
 const RISK_LEVELS = ['NOT_ASSESSED', 'LOW', 'MODERATE', 'ELEVATED'] as const;
 
 function responseSummary(value: unknown): string {
@@ -47,7 +47,7 @@ export default function AdultClinicalReviewsScreen() {
   const [cases, setCases] = useState<AdultCase[]>([]);
   const [loading, setLoading] = useState(true);
   const [expandedId, setExpandedId] = useState<number | null>(null);
-  const [decision, setDecision] = useState<(typeof DECISIONS)[number]>('MONITOR');
+  const [decision, setDecision] = useState<(typeof DECISIONS)[number]>('WATCH');
   const [risk, setRisk] = useState<(typeof RISK_LEVELS)[number]>('NOT_ASSESSED');
   const [note, setNote] = useState('');
   const [nextAction, setNextAction] = useState('');
@@ -86,7 +86,7 @@ export default function AdultClinicalReviewsScreen() {
 
   const openReview = (personId: number) => {
     setExpandedId(expandedId === personId ? null : personId);
-    setDecision('MONITOR');
+    setDecision('WATCH');
     setRisk('NOT_ASSESSED');
     setNote('');
     setNextAction('');
@@ -240,7 +240,7 @@ export default function AdultClinicalReviewsScreen() {
 
                 {expanded ? (
                   <View style={styles.form}>
-                    <Text style={styles.section}>Decision</Text>
+                    <Text style={styles.section}>Clinician-entered result status</Text>
                     <View style={styles.chips}>
                       {DECISIONS.map((choice) => (
                         <Pressable

@@ -402,6 +402,22 @@ export default function AdultDashboard() {
           disabled
         />
 
+        <ActionCard
+          icon="📄"
+          title="Results"
+          description="See clinician-entered status, risk level, and recommendation when available."
+          buttonText="View Results"
+          onPress={() => navigate('/adult/results')}
+        />
+
+        <ActionCard
+          icon="🎯"
+          title="One-step Plan"
+          description="Focus on one next action based on your saved information and clinician review."
+          buttonText="View My Plan"
+          onPress={() => navigate('/adult/plan')}
+        />
+
         {journey ? (
           <>
             <View style={styles.sectionHeader}>
@@ -468,9 +484,9 @@ export default function AdultDashboard() {
 
         <ActionCard
           icon="🤖"
-          title="Nura AI Assistant"
-          description="Get general preventive brain health information and guidance."
-          buttonText="Talk to Nura"
+          title="Nura Prevention Guide"
+          description="Ask Nura to explain your clinician-entered result or next step."
+          buttonText="Chat with Nura"
           onPress={() => navigate('/ai-assistant')}
         />
 

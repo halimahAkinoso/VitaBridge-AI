@@ -97,7 +97,7 @@ export default function HearingVisionScreening() {
       };
 
       await saveAdultHearingVision(payload);
-      router.replace('/adult/dashboard');
+      router.replace('/adult/results');
     } catch (error: unknown) {
       console.error('Adult hearing and vision save failed:', error);
 

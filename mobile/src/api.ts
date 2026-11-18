@@ -112,7 +112,7 @@ export const getAdultClinicianQueue = () =>
 export const submitAdultClinicalReview = (
   personId: number,
   payload: {
-    decision: 'MONITOR' | 'FOLLOW_UP' | 'REFER';
+    decision: 'WATCH' | 'ACT' | 'REFER' | 'MONITOR' | 'FOLLOW_UP';
     risk: 'NOT_ASSESSED' | 'LOW' | 'MODERATE' | 'ELEVATED';
     note: string;
     next_action: string;
@@ -216,6 +216,12 @@ export const agentChat = (message: string) =>
 
 export const getPreventionOverview = () =>
   api.get('/agent/overview');
+
+export const getAdultResults = () =>
+  api.get('/agent/results');
+
+export const getAdultActionPlan = () =>
+  api.get('/agent/plan');
 
 export const getFamilyHealthPassport = () =>
   api.get('/passport/family/me');

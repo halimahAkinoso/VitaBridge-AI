@@ -103,8 +103,8 @@ export default function NuraAssistantScreen() {
   };
 
   const quickPrompts = isArabic
-    ? ['ما خطوتي التالية؟', 'اشرح فحص الإدراك', 'فاتني موعد متابعة', 'لدي قلق بشأن السمع']
-    : ['What is my next step?', 'Explain cognitive screening', 'I missed a follow-up', 'I have a hearing concern'];
+    ? ['اشرح نتيجتي', 'ما خطوتي التالية؟', 'اشرح فحص الإدراك', 'فاتني موعد متابعة']
+    : ['Explain my result', 'What is my next step?', 'Explain cognitive screening', 'I missed a follow-up'];
 
   return (
     <Screen>

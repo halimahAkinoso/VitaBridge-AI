@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime, timezone
 
 from fastapi.testclient import TestClient
 from argon2 import PasswordHasher
@@ -652,14 +652,29 @@ def test_adult_clinician_review_requires_clinician_and_creates_referral():
         json={
             "health_conditions": ["Prefer not to say"],
             "blood_pressure_history": "Prefer not to say",
-            "sleep_quality": "Fair",
+            "sleep_quality": "Poor",
             "physical_activity": "Lightly active",
             "social_engagement": "Sometimes",
             "mood": "Good",
-            "memory_concerns": "No concerns",
+            "memory_concerns": "Occasional forgetfulness",
         },
     )
     assert baseline.status_code == 200, baseline.text
+    hearing_vision = client.post(
+        "/api/screening/adult/hearing-vision",
+        headers=headers,
+        json={
+            "responses": {
+                "hearing_difficulty": "Often",
+                "hearing_environment": "Often",
+                "hearing_aid": "No",
+                "vision_difficulty": "Never",
+                "vision_reading": "Never",
+                "vision_support": "No",
+            },
+        },
+    )
+    assert hearing_vision.status_code == 200, hearing_vision.text
 
     db = SessionLocal()
     try:
@@ -697,23 +712,89 @@ def test_adult_clinician_review_requires_clinician_and_creates_referral():
     assert queue.status_code == 200, queue.text
     assert any(item["person_id"] == person_id for item in queue.json()["adults"])
 
+    pending_result = client.get("/api/agent/results", headers=headers)
+    assert pending_result.status_code == 200, pending_result.text
+    assert pending_result.json()["result"]["available"] is False
+    assert pending_result.json()["result"]["status"] == "PENDING_REVIEW"
+
     review_payload = {
-        "decision": "REFER",
+        "decision": "WATCH",
         "risk": "MODERATE",
         "note": "Synthetic clinician review note.",
-        "next_action": "Discuss follow-up with primary care.",
+        "next_action": "Discuss hearing follow-up with your care team.",
+    }
+    watch_review = client.post(
+        f"/api/screening/clinician/adult-review/{person_id}",
+        headers=clinician_headers,
+        json=review_payload,
+    )
+    assert watch_review.status_code == 200, watch_review.text
+    assert watch_review.json()["referral"] is None
+
+    result = client.get("/api/agent/results", headers=headers)
+    assert result.status_code == 200, result.text
+    assert result.json()["result"]["status"] == "WATCH"
+    assert result.json()["result"]["risk"] == "MODERATE"
+    assert result.json()["result"]["source"] == "clinician_review"
+    assert result.json()["reported_context"] == [
+        "memory concerns",
+        "poor sleep",
+        "hearing difficulty",
+    ]
+
+    plan = client.get("/api/agent/plan", headers=headers)
+    assert plan.status_code == 200, plan.text
+    assert plan.json()["count"] == 1
+    assert len(plan.json()["actions"]) == 1
+    assert plan.json()["actions"][0]["detail"] == review_payload["next_action"]
+
+    explanation = client.post(
+        "/api/agent/chat",
+        headers=headers,
+        json={"message": "Explain my result"},
+    )
+    assert explanation.status_code == 200, explanation.text
+    assert "status WATCH and risk MODERATE" in explanation.json()["reply"]
+    assert review_payload["next_action"] in explanation.json()["reply"]
+    assert "does not establish a cause" in explanation.json()["reply"]
+
+    updated_hearing_vision = client.post(
+        "/api/screening/adult/hearing-vision",
+        headers=headers,
+        json={
+            "responses": {
+                "hearing_difficulty": "Sometimes",
+                "hearing_environment": "Sometimes",
+                "hearing_aid": "No",
+                "vision_difficulty": "Never",
+                "vision_reading": "Never",
+                "vision_support": "No",
+            },
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+        },
+    )
+    assert updated_hearing_vision.status_code == 200, updated_hearing_vision.text
+    refreshed_result = client.get("/api/agent/results", headers=headers)
+    assert refreshed_result.status_code == 200, refreshed_result.text
+    assert refreshed_result.json()["result"]["status"] == "PENDING_REVIEW"
+    assert refreshed_result.json()["result"]["risk"] == "NOT_ASSESSED"
+
+    referral_payload = {
+        **review_payload,
+        "decision": "REFER",
+        "next_action": "Contact the primary care team about this referral.",
     }
     missing_specialty = client.post(
         f"/api/screening/clinician/adult-review/{person_id}",
         headers=clinician_headers,
-        json=review_payload,
+        json=referral_payload,
     )
     assert missing_specialty.status_code == 422
 
     review = client.post(
         f"/api/screening/clinician/adult-review/{person_id}",
         headers=clinician_headers,
-        json={**review_payload, "referral_specialty": "Primary Care"},
+        json={**referral_payload, "referral_specialty": "Primary Care"},
     )
     assert review.status_code == 200, review.text
     assert review.json()["review"]["risk"] == "MODERATE"

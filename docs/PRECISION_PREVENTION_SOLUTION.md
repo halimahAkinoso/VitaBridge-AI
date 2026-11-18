@@ -19,17 +19,32 @@ profiles already associated with the signed-in account.
    optional check-in status, six prevention domains, descriptive
    self-reported trends when enough observations exist, and clinician-entered
    review/referral information.
-5. **Use Nura:** Nura explains recorded next steps, helps the user think
-   through common participation barriers, and directs clinical concerns to a
-   care professional. The Nura conversation and daily check-in support English
-   and Arabic based on the saved adult profile preference. Nura does not
-   diagnose, estimate a cognitive score, book appointments, or call an external
-   AI service; broader app localization remains future work.
-6. **Clinical follow-up:** Authorized clinicians can review submitted adult
-   context and record their own decision, risk label, note, and next action.
-   The system creates a referral only from a clinician-selected `REFER`
-   decision. Users can see clinician reviews in screening history and follow-up
-   in the passport.
+5. **Review results:** Saving hearing and vision opens Results. Until a
+   clinician reviews the responses, the page says review is pending and does
+   not invent a status or risk. After review, it shows the clinician-entered
+   status (for example `WATCH`), risk (for example `MODERATE`), and
+   recommendation.
+6. **Ask Nura:** “Explain my result” summarizes the saved clinician result,
+   reports any relevant self-reported context without implying cause, and
+   repeats the clinician's recommendation. Nura helps users think through
+   participation barriers and directs clinical concerns to a care
+   professional. The conversation and check-in support English and Arabic
+   based on the saved adult profile preference. Nura does not diagnose,
+   estimate a cognitive score, book appointments, or call an external AI
+   service; broader app localization remains future work.
+7. **Follow one action:** Plan shows exactly one next action. It uses the
+   clinician's recommendation when present; otherwise it selects a next step
+   from saved profile and assessment data.
+8. **Clinical follow-up:** Authorized clinicians can review submitted adult
+   context and record their own result status, risk label, note, and next
+   action. The system creates a referral only from a clinician-selected
+   `REFER` status. Users can see clinician reviews in screening history and
+   follow-up in the passport.
+
+The Nura workflow is orchestrated in the backend from authenticated result,
+plan, and profile tools. Its current responses are local, bounded templates and
+decision rules—not an external generative model or autonomous appointment
+agent. It requires the user or clinician to initiate actions.
 
 ## Connected family passport
 

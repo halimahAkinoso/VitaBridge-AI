@@ -11,6 +11,8 @@ GET /api/screening/adult/history (authenticated adult account)
 POST /api/screening/adult/baseline
 POST /api/screening/adult/hearing-vision
 GET /api/agent/overview (adult prevention journey)
+GET /api/agent/results (clinician-entered result or pending-review state)
+GET /api/agent/plan (exactly one next action)
 POST /api/agent/check-in (self-reported sleep hours and/or mood 1–5)
 GET /api/agent/check-ins (authenticated adult account)
 POST /api/agent/chat (bounded, non-diagnostic Nura guidance)
@@ -19,7 +21,7 @@ POST /api/agent/proactive-check
 POST /api/agent/monitoring-plan
 GET /api/doctor/dashboard
 GET /api/screening/clinician/adult-queue (clinician only)
-POST /api/screening/clinician/adult-review/{person_id} (clinician only)
+POST /api/screening/clinician/adult-review/{person_id} (clinician-only status, risk, and action)
 GET /api/notifications/{person_id} (account-owned person only)
 GET /api/passport/{person_id}
 GET /api/passport/family/me (account-linked profiles only)

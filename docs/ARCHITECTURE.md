@@ -10,6 +10,10 @@
   account.
 - The adult prevention overview derives its next step from saved profile,
   self-reported assessments, check-ins, referrals, and clinician reviews.
+- Adult Results are pending until an authorized clinician records a status
+  and risk. The Plan endpoint returns one action, prioritizing the clinician's
+  recommendation. Nura's result explanation reads those same account-scoped
+  tools so its response matches the Results and Plan screens.
 - Nura currently uses bounded local response templates. Health context is not
   sent to an external AI provider. Check-ins and trend summaries are
   self-reported and are not clinical scores or diagnoses.

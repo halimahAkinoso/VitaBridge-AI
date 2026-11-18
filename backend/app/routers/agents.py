@@ -105,6 +105,134 @@ def _open_referrals(db: Session, person_id: int) -> list[Referral]:
     )
 
 
+def _latest_clinician_review(
+    db: Session,
+    person_id: int,
+) -> Optional[AdultClinicalReview]:
+    return (
+        db.query(AdultClinicalReview)
+        .filter(AdultClinicalReview.person_id == person_id)
+        .order_by(AdultClinicalReview.created_at.desc())
+        .first()
+    )
+
+
+def _result_status(decision: str) -> str:
+    if decision in ("WATCH", "MONITOR"):
+        return "WATCH"
+    if decision in ("ACT", "FOLLOW_UP"):
+        return "ACT"
+    if decision == "REFER":
+        return "REFER"
+    return "NOT_ASSESSED"
+
+
+def _utc_datetime(value: object) -> Optional[datetime]:
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _has_newer_assessment(
+    person: Person,
+    review: AdultClinicalReview,
+) -> bool:
+    reviewed_at = _utc_datetime(review.created_at)
+    assessment_times = [
+        _utc_datetime(_assessment(person, key).get("completed_at"))
+        for key in ("adult_health_assessment", "adult_hearing_vision")
+    ]
+    latest_assessment = max(
+        (value for value in assessment_times if value is not None),
+        default=None,
+    )
+    return bool(
+        latest_assessment
+        and (reviewed_at is None or latest_assessment > reviewed_at)
+    )
+
+
+def _clinical_result(
+    person: Person,
+    db: Session,
+) -> dict:
+    review = _latest_clinician_review(db, person.id)
+    if not review:
+        return {
+            "available": False,
+            "status": "PENDING_REVIEW",
+            "risk": "NOT_ASSESSED",
+            "recommendation": None,
+            "reviewed_at": None,
+            "source": None,
+            "message": (
+                "Your responses are saved. A clinician must review them before "
+                "a result status or risk level can be shown."
+            ),
+        }
+
+    if _has_newer_assessment(person, review):
+        return {
+            "available": False,
+            "status": "PENDING_REVIEW",
+            "risk": "NOT_ASSESSED",
+            "recommendation": None,
+            "reviewed_at": None,
+            "source": None,
+            "message": (
+                "You saved newer assessment responses after the last clinician "
+                "review. A clinician must review the updated information before "
+                "a result status or risk level is shown."
+            ),
+        }
+
+    return {
+        "available": True,
+        "status": _result_status(review.decision),
+        "risk": review.risk,
+        "recommendation": review.next_action,
+        "reviewed_at": (
+            review.created_at.isoformat()
+            if review.created_at
+            else None
+        ),
+        "source": "clinician_review",
+        "message": (
+            "Status and risk are entered by your clinician; they are not "
+            "generated from the questionnaire."
+        ),
+    }
+
+
+def _reported_result_context(person: Person) -> list[str]:
+    baseline = _assessment(person, "adult_health_assessment").get("responses", {})
+    sensory = _assessment(person, "adult_hearing_vision").get("responses", {})
+    baseline = baseline if isinstance(baseline, dict) else {}
+    sensory = sensory if isinstance(sensory, dict) else {}
+    context = []
+
+    memory = str(baseline.get("memory_concerns", "")).lower()
+    if memory and not any(
+        phrase in memory for phrase in ("no concerns", "prefer not to say")
+    ):
+        context.append("memory concerns")
+    sleep = str(baseline.get("sleep_quality", "")).lower()
+    if sleep in ("poor", "very poor"):
+        context.append("poor sleep")
+    if sensory.get("hearing_difficulty") in ("Often", "Always"):
+        context.append("hearing difficulty")
+    if sensory.get("vision_difficulty") in ("Often", "Always"):
+        context.append("vision difficulty")
+    return context
+
+
 def _prevention_plan(
     baseline_assessment: dict,
     sensory_assessment: dict,
@@ -225,12 +353,9 @@ def _build_overview(
         .all()
     )
     referrals = _open_referrals(db, person.id)
-    latest_review = (
-        db.query(AdultClinicalReview)
-        .filter(AdultClinicalReview.person_id == person.id)
-        .order_by(AdultClinicalReview.created_at.desc())
-        .first()
-    )
+    latest_review = _latest_clinician_review(db, person.id)
+    clinical_result = _clinical_result(person, db)
+    review_is_current = clinical_result["available"]
     baseline_complete = bool(baseline_assessment)
     sensory_complete = bool(sensory_assessment)
     responses = sensory_assessment.get("responses", {})
@@ -258,7 +383,7 @@ def _build_overview(
             "detail": f"Check the status of your {referrals[0].specialty or 'healthcare'} referral with your care team.",
             "route": "/screening/referrals",
         }
-    elif latest_review:
+    elif latest_review and review_is_current:
         action = {
             "title": "Follow your clinician's recommendation",
             "detail": latest_review.next_action,
@@ -382,7 +507,7 @@ def _build_overview(
                     else None
                 ),
             }
-            if latest_review
+            if latest_review and review_is_current
             else None
         ),
         "self_reported_change_observations": change_observations,
@@ -403,6 +528,64 @@ def prevention_overview(
             detail="The adult prevention overview requires an adult account.",
         )
     return _build_overview(person, db)
+
+
+@router.get("/results")
+def adult_results(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    person = _get_person(current_user, db)
+    if current_user.role != "adult":
+        raise HTTPException(
+            status_code=403,
+            detail="Adult results require an adult account.",
+        )
+    return {
+        "person_id": person.id,
+        "person_name": person.name,
+        "result": _clinical_result(person, db),
+        "reported_context": _reported_result_context(person),
+        "disclaimer": safety_disclaimer(),
+    }
+
+
+@router.get("/plan")
+def adult_action_plan(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    person = _get_person(current_user, db)
+    if current_user.role != "adult":
+        raise HTTPException(
+            status_code=403,
+            detail="The adult action plan requires an adult account.",
+        )
+
+    result = _clinical_result(person, db)
+    if result["available"] and result["recommendation"]:
+        action = {
+            "title": "Your clinician's recommended next action",
+            "detail": result["recommendation"],
+            "source": "clinician_review",
+        }
+    else:
+        next_action = _build_overview(person, db)["next_best_action"]
+        action = {
+            **next_action,
+            "source": "saved_profile_and_assessments",
+        }
+
+    return {
+        "actions": [action],
+        "count": 1,
+        "result_status": result["status"],
+        "booking_available": False,
+        "disclaimer": (
+            "This is one next step based on saved information. VitaBridge "
+            "does not book appointments or replace clinician advice."
+        ),
+    }
 
 
 @router.post("/check-in")
@@ -570,6 +753,39 @@ def chat(
         if any(
             term in lowered
             for term in (
+                "نتيجتي",
+                "اشرح النتيجة",
+                "نتائجي",
+                "explain my result",
+                "explain my results",
+                "what is my result",
+            )
+        ):
+            result = _clinical_result(person, db)
+            if result["available"]:
+                context = _reported_result_context(person)
+                context_text = (
+                    " تتضمن إجاباتك أيضاً: "
+                    + "، ".join(context)
+                    + ". قد تفيد هذه المعلومات الطبيب في فهم السياق، لكنها لا تثبت وجود سبب."
+                    if context
+                    else ""
+                )
+                reply = (
+                    f"سجّل طبيبك الحالة {result['status']} ومستوى المخاطر "
+                    f"{result['risk']}. هذه معلومات أدخلها الطبيب وليست "
+                    "تشخيصاً أو درجة أنشأها الذكاء الاصطناعي. الخطوة "
+                    f"الموصى بها: {result['recommendation']}"
+                    f"{context_text}"
+                )
+            else:
+                reply = (
+                    "تم حفظ إجاباتك، لكنها بانتظار مراجعة الطبيب. لا "
+                    "يحسب التطبيق حالة أو مستوى مخاطر من الاستبيان."
+                )
+        elif any(
+            term in lowered
+            for term in (
                 "موا",
                 "إدراكي",
                 "الإدراك",
@@ -609,7 +825,31 @@ def chat(
             "disclaimer": "نورة دليل للمعلومات وليست بديلاً عن المختص الصحي أو التشخيص الطبي.",
         }
 
-    if any(term in lowered for term in ("moca", "cognitive score", "memory score", "screening result")):
+    if any(term in lowered for term in ("explain my result", "explain my results", "what is my result")):
+        result = _clinical_result(person, db)
+        if result["available"]:
+            context = _reported_result_context(person)
+            context_text = (
+                " Your self-reported information also mentions "
+                + ", ".join(context)
+                + ". This may be relevant context for your clinician, but it does not establish a cause."
+                if context
+                else ""
+            )
+            reply = (
+                f"Your clinician recorded status {result['status']} and "
+                f"risk {result['risk']}. These were entered by your clinician; "
+                "they are not an AI-generated score or diagnosis. "
+                f"The recommended next step is: {result['recommendation']}."
+                f"{context_text}"
+            )
+        else:
+            reply = (
+                "Your responses are saved and awaiting clinician review. "
+                "VitaBridge does not calculate a status or risk level from "
+                "the questionnaire."
+            )
+    elif any(term in lowered for term in ("moca", "cognitive score", "memory score", "screening result")):
         reply = (
             "There is no approved cognitive screening result recorded in "
             "your profile, so I cannot interpret or estimate a cognitive "
