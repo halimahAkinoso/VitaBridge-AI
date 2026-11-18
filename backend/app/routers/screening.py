@@ -1,0 +1,1138 @@
+
+from datetime import date, datetime
+from typing import Any, Optional, Literal
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
+
+from app.core.database import get_db
+from app.models import User, Person, Screening, Referral
+from app.routers.users import get_current_user
+from app.services.instrument_registry import list_instruments
+
+
+router = APIRouter()
+
+
+# =========================================================
+# COMMON DATE UTILITIES
+# =========================================================
+
+def parse_date_of_birth(value: Optional[str]) -> date:
+    if not value:
+        raise HTTPException(
+            status_code=400,
+            detail="Date of birth is missing.",
+        )
+
+    for date_format in ("%Y-%m-%d", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(value.strip(), date_format).date()
+        except ValueError:
+            continue
+
+    raise HTTPException(
+        status_code=400,
+        detail="The saved date of birth is invalid.",
+    )
+
+
+def calculate_age_in_months(dob: date) -> int:
+    today = date.today()
+
+    months = (
+        (today.year - dob.year) * 12
+        + today.month - dob.month
+    )
+
+    if today.day < dob.day:
+        months -= 1
+
+    return months
+
+
+def calculate_age_in_years(dob: date) -> int:
+    today = date.today()
+
+    years = today.year - dob.year
+
+    if (today.month, today.day) < (dob.month, dob.day):
+        years -= 1
+
+    return years
+
+
+# =========================================================
+# CHILD SCREENING REQUEST
+# =========================================================
+
+class ChildScreeningRequest(BaseModel):
+    age_months: Optional[int] = Field(
+        default=None,
+        ge=0,
+        le=120,
+    )
+
+    milestones: dict[str, Any] = Field(default_factory=dict)
+    growth: dict[str, Any] = Field(default_factory=dict)
+    answers: dict[str, Any] = Field(default_factory=dict)
+
+    instrument_name: Optional[str] = Field(
+        default=None,
+        max_length=100,
+    )
+
+    instrument_version: Optional[str] = Field(
+        default=None,
+        max_length=50,
+    )
+
+    notes: Optional[str] = Field(
+        default=None,
+        max_length=2000,
+    )
+
+    submission_id: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+    )
+
+
+# =========================================================
+# ADULT PROFILE REQUEST
+# =========================================================
+
+class AdultProfileRequest(BaseModel):
+    name: str = Field(min_length=2, max_length=150)
+    dob: date
+
+    sex: Optional[str] = Field(default=None, max_length=30)
+    nationality: Optional[str] = Field(
+        default=None,
+        max_length=100,
+    )
+    language: Literal["en", "ar"] = "en"
+    education: Optional[str] = Field(default=None, max_length=100)
+    culture: Optional[str] = Field(default=None, max_length=100)
+
+
+# =========================================================
+# ADULT BASELINE REQUEST
+# =========================================================
+
+class AdultBaselineRequest(BaseModel):
+    health_conditions: list[str] = Field(default_factory=list)
+
+    blood_pressure_history: str = Field(min_length=1, max_length=100)
+    sleep_quality: str = Field(min_length=1, max_length=100)
+    physical_activity: str = Field(min_length=1, max_length=100)
+    social_engagement: str = Field(min_length=1, max_length=100)
+    mood: str = Field(min_length=1, max_length=100)
+    memory_concerns: str = Field(min_length=1, max_length=150)
+
+    additional_notes: str = Field(
+        default="",
+        max_length=1000,
+    )
+
+
+
+
+# =========================================================
+# ADULT HEARING AND VISION REQUEST
+# =========================================================
+
+class AdultHearingVisionRequest(BaseModel):
+    responses: dict[str, str] = Field(default_factory=dict)
+    completed_at: Optional[str] = Field(default=None, max_length=50)
+
+# =========================================================
+# CHILD CLINICIAN REVIEW REQUEST
+# =========================================================
+
+class ChildReviewRequest(BaseModel):
+    decision: Literal["MONITOR", "FOLLOW_UP", "REFER"]
+
+    clinician_note: str = Field(
+        min_length=3,
+        max_length=2000,
+    )
+
+    next_action: str = Field(
+        min_length=3,
+        max_length=255,
+    )
+
+    risk: Literal[
+        "NOT_ASSESSED",
+        "FOLLOW_UP_RECOMMENDED",
+        "URGENT_REVIEW",
+    ]
+
+    referral_specialty: Optional[str] = Field(
+        default=None,
+        max_length=100,
+    )
+
+
+# =========================================================
+# REFERRAL STATUS REQUEST
+# =========================================================
+
+class ReferralStatusRequest(BaseModel):
+    status: Literal[
+        "OPEN",
+        "SCHEDULED",
+        "IN_PROGRESS",
+        "COMPLETED",
+        "CANCELLED",
+    ]
+
+
+# =========================================================
+# ACCESS CONTROL
+# =========================================================
+
+def get_parent_child(
+    current_user: User,
+    db: Session,
+) -> Person:
+
+    if current_user.role != "parent":
+        raise HTTPException(
+            status_code=403,
+            detail="A parent account is required for child screening.",
+        )
+
+    child = (
+        db.query(Person)
+        .filter(
+            Person.owner_id == current_user.id,
+            Person.type == "child",
+        )
+        .order_by(Person.id.asc())
+        .first()
+    )
+
+    if not child:
+        raise HTTPException(
+            status_code=404,
+            detail="Complete the child profile before screening.",
+        )
+
+    return child
+
+
+def get_adult_person(
+    current_user: User,
+    db: Session,
+) -> Person:
+
+    if current_user.role != "adult":
+        raise HTTPException(
+            status_code=403,
+            detail="An adult account is required.",
+        )
+
+    person = (
+        db.query(Person)
+        .filter(
+            Person.owner_id == current_user.id,
+            Person.type == "adult",
+        )
+        .order_by(Person.id.asc())
+        .first()
+    )
+
+    return person
+
+
+def require_clinician(current_user: User):
+
+    if current_user.role not in ("doctor", "admin"):
+        raise HTTPException(
+            status_code=403,
+            detail="Authorised clinician access is required.",
+        )
+
+
+def verify_child_eligibility(child: Person) -> int:
+
+    dob = parse_date_of_birth(child.dob)
+    age_months = calculate_age_in_months(dob)
+
+    if age_months < 1 or age_months > 72:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "This child is outside the developmental "
+                "screening age range of 1 to 72 completed months."
+            ),
+        )
+
+    return age_months
+
+
+def validate_adult_eligibility(dob: date) -> int:
+
+    if dob > date.today():
+        raise HTTPException(
+            status_code=400,
+            detail="Date of birth cannot be in the future.",
+        )
+
+    age = calculate_age_in_years(dob)
+
+    if age < 50 or age > 75:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "The VitaBridge adult screening pathway "
+                "is available for ages 50 to 75."
+            ),
+        )
+
+    return age
+
+
+# =========================================================
+# SCREENING SERIALIZATION
+# =========================================================
+
+def serialize_screening(record: Screening) -> dict:
+
+    return {
+        "id": record.id,
+        "person_id": record.person_id,
+        "kind": record.kind,
+        "visit_no": record.visit_no,
+        "age_months": (
+            record.visit_no
+            if record.kind == "CHILD_DEVELOPMENT"
+            else None
+        ),
+        "scores": record.scores or {},
+        "raw_answers": record.raw_answers or {},
+        "risk": record.risk,
+        "status": record.status,
+        "ai_summary": record.ai_summary,
+        "next_action": record.next_action,
+        "clinician_reviewed": record.clinician_reviewed,
+        "created_at": (
+            record.created_at.isoformat()
+            if record.created_at
+            else None
+        ),
+    }
+
+
+# =========================================================
+# CHILD DEVELOPMENT SCREENING
+# =========================================================
+
+@router.post("/child")
+def child_screen(
+    payload: ChildScreeningRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+
+    child = get_parent_child(current_user, db)
+
+    actual_age_months = verify_child_eligibility(child)
+
+    if (
+        payload.age_months is not None
+        and payload.age_months != actual_age_months
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "The submitted age does not match the child's "
+                "saved date of birth. Refresh the profile."
+            ),
+        )
+
+    raw_answers = {
+        "milestones": payload.milestones,
+        "growth": payload.growth,
+        "answers": payload.answers,
+        "instrument_name": payload.instrument_name,
+        "instrument_version": payload.instrument_version,
+        "notes": payload.notes,
+    }
+
+    if payload.submission_id:
+        existing = (
+            db.query(Screening)
+            .filter(Screening.submission_id == payload.submission_id)
+            .first()
+        )
+        if existing:
+            if (
+                existing.person_id != child.id
+                or existing.raw_answers != raw_answers
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail="This submission ID has already been used for different responses.",
+                )
+            return {
+                "message": "Child screening record already saved.",
+                "screening": serialize_screening(existing),
+                "clinical_assessment_completed": False,
+                "review_required": True,
+            }
+
+    record = Screening(
+        person_id=child.id,
+        kind="CHILD_DEVELOPMENT",
+        visit_no=actual_age_months,
+        scores={},
+        raw_answers=raw_answers,
+        risk="NOT_ASSESSED",
+        status="PENDING_REVIEW",
+        ai_summary=None,
+        modifiable_factors=[],
+        next_action=(
+            "Await review by an authorised healthcare professional."
+        ),
+        clinician_reviewed=False,
+        submission_id=payload.submission_id,
+    )
+
+    try:
+        db.add(record)
+        db.commit()
+        db.refresh(record)
+
+    except IntegrityError:
+        db.rollback()
+        if not payload.submission_id:
+            raise HTTPException(
+                status_code=500,
+                detail="Unable to save the child screening record.",
+            )
+
+        existing = (
+            db.query(Screening)
+            .filter(Screening.submission_id == payload.submission_id)
+            .first()
+        )
+        if (
+            existing
+            and existing.person_id == child.id
+            and existing.raw_answers == raw_answers
+        ):
+            return {
+                "message": "Child screening record already saved.",
+                "screening": serialize_screening(existing),
+                "clinical_assessment_completed": False,
+                "review_required": True,
+            }
+        raise HTTPException(
+            status_code=409,
+            detail="This observation has already been submitted.",
+        )
+
+    except Exception:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail="Unable to save the child screening record.",
+        )
+
+    return {
+        "message": "Child screening record saved successfully.",
+        "screening": serialize_screening(record),
+        "clinical_assessment_completed": False,
+        "review_required": True,
+    }
+
+
+@router.get("/instruments")
+def screening_instruments(
+    pathway: Optional[Literal["child", "adult"]] = None,
+    current_user: User = Depends(get_current_user),
+):
+    role_pathway = {
+        "parent": "child",
+        "adult": "adult",
+    }.get(current_user.role)
+
+    if current_user.role in ("doctor", "admin"):
+        allowed = {"child", "adult"}
+    elif role_pathway:
+        allowed = {role_pathway}
+    else:
+        raise HTTPException(
+            status_code=403,
+            detail="This account cannot access screening instruments.",
+        )
+
+    requested = {pathway} if pathway else allowed
+    if not requested.issubset(allowed):
+        raise HTTPException(
+            status_code=403,
+            detail="This account cannot access that screening pathway.",
+        )
+
+    instruments = []
+    if "child" in requested:
+        instruments = [
+            {
+                **instrument,
+                "pathway": "child",
+                "available": instrument["status"] == "active_prototype",
+            }
+            for instrument in list_instruments()
+        ]
+
+    return {
+        "pathway": pathway,
+        "instruments": instruments,
+    }
+
+
+# =========================================================
+# ADULT PROFILE
+# =========================================================
+
+@router.get("/adult/profile")
+def get_adult_profile(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+
+    person = get_adult_person(current_user, db)
+
+    if not person:
+        return {
+            "profile_complete": False,
+            "eligible": False,
+            "profile": None,
+        }
+
+    dob = parse_date_of_birth(person.dob)
+    age = validate_adult_eligibility(dob)
+
+    complete = bool(
+        person.name
+        and person.dob
+        and person.sex
+    )
+
+    return {
+        "profile_complete": complete,
+        "eligible": True,
+        "age": age,
+        "profile": {
+            "id": person.id,
+            "name": person.name,
+            "dob": person.dob,
+            "sex": person.sex,
+            "nationality": person.nationality,
+            "language": person.language,
+            "education": person.education,
+            "culture": person.culture,
+            "hearing": person.hearing,
+            "vision": person.vision,
+            "baseline": person.baseline or {},
+        },
+    }
+
+
+@router.put("/adult/profile")
+def save_adult_profile(
+    payload: AdultProfileRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+
+    if current_user.role != "adult":
+        raise HTTPException(
+            status_code=403,
+            detail="An adult account is required.",
+        )
+
+    age = validate_adult_eligibility(payload.dob)
+
+    person = (
+        db.query(Person)
+        .filter(
+            Person.owner_id == current_user.id,
+            Person.type == "adult",
+        )
+        .first()
+    )
+
+    if not person:
+        person = Person(
+            owner_id=current_user.id,
+            type="adult",
+            baseline={},
+        )
+        db.add(person)
+
+    person.name = payload.name.strip()
+    person.dob = payload.dob.isoformat()
+    person.sex = payload.sex
+    person.nationality = payload.nationality
+    person.language = payload.language
+    fields_set = (
+        payload.model_fields_set
+        if hasattr(payload, "model_fields_set")
+        else payload.__fields_set__
+    )
+    if "education" in fields_set:
+        person.education = payload.education
+    if "culture" in fields_set:
+        person.culture = payload.culture
+
+    if person.baseline is None:
+        person.baseline = {}
+
+    try:
+        db.commit()
+        db.refresh(person)
+
+    except Exception:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail="Unable to save the adult profile.",
+        )
+
+    return {
+        "message": "Adult profile saved successfully.",
+        "profile_complete": True,
+        "eligible": True,
+        "age": age,
+        "profile": {
+            "id": person.id,
+            "name": person.name,
+            "dob": person.dob,
+            "sex": person.sex,
+            "nationality": person.nationality,
+            "language": person.language,
+            "education": person.education,
+            "culture": person.culture,
+        },
+    }
+
+
+# =========================================================
+# ADULT BASELINE ASSESSMENT
+# =========================================================
+
+@router.post("/adult/baseline")
+def save_adult_baseline(
+    payload: AdultBaselineRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+
+    person = get_adult_person(current_user, db)
+
+    if not person:
+        raise HTTPException(
+            status_code=404,
+            detail="Complete your adult profile first.",
+        )
+
+    if not person.dob:
+        raise HTTPException(
+            status_code=400,
+            detail="Your date of birth is missing.",
+        )
+
+    validate_adult_eligibility(
+        parse_date_of_birth(person.dob)
+    )
+
+    baseline = dict(person.baseline or {})
+
+    baseline["adult_health_assessment"] = (
+        payload.model_dump()
+        if hasattr(payload, "model_dump")
+        else payload.dict()
+    )
+
+    person.baseline = baseline
+
+    try:
+        db.commit()
+        db.refresh(person)
+
+    except Exception:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail="Unable to save the adult baseline assessment.",
+        )
+
+    return {
+        "success": True,
+        "message": "Adult baseline assessment saved.",
+        "assessment": "adult_health_assessment",
+        "clinical_score_generated": False,
+    }
+
+
+
+
+# =========================================================
+# ADULT HEARING AND VISION SCREENING
+# =========================================================
+
+@router.post("/adult/hearing-vision")
+def save_adult_hearing_vision(
+    payload: AdultHearingVisionRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    person = get_adult_person(current_user, db)
+
+    if not person:
+        raise HTTPException(
+            status_code=404,
+            detail="Complete your adult profile first.",
+        )
+
+    if not person.dob:
+        raise HTTPException(
+            status_code=400,
+            detail="Your date of birth is missing.",
+        )
+
+    validate_adult_eligibility(
+        parse_date_of_birth(person.dob)
+    )
+
+    if not payload.responses:
+        raise HTTPException(
+            status_code=422,
+            detail="At least one hearing or vision response is required.",
+        )
+
+    baseline = dict(person.baseline or {})
+    baseline["adult_hearing_vision"] = {
+        "responses": payload.responses,
+        "completed_at": payload.completed_at or datetime.utcnow().isoformat(),
+        "status": "COMPLETED",
+        "clinical_score_generated": False,
+    }
+
+    person.baseline = baseline
+
+    try:
+        db.commit()
+        db.refresh(person)
+    except Exception:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail="Unable to save hearing and vision responses.",
+        )
+
+    return {
+        "success": True,
+        "message": "Hearing and vision responses saved.",
+        "assessment": "adult_hearing_vision",
+        "clinical_score_generated": False,
+    }
+
+# =========================================================
+# ADULT COGNITIVE SCREENING
+# =========================================================
+
+@router.post("/adult")
+def adult_screen(
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Cognitive assessment is intentionally gated.
+
+    Do not generate MoCA scores from defaults or
+    unvalidated questionnaires.
+    """
+
+    if current_user.role != "adult":
+        raise HTTPException(
+            status_code=403,
+            detail="An adult account is required.",
+        )
+
+    raise HTTPException(
+        status_code=403,
+        detail=(
+            "Cognitive screening is not yet enabled. "
+            "The required instrument permissions and "
+            "clinical approvals must be in place first."
+        ),
+    )
+
+
+# =========================================================
+# CHILD CLINICIAN REVIEW QUEUE
+# =========================================================
+
+@router.get("/clinician/child-queue")
+def get_child_clinician_queue(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+
+    require_clinician(current_user)
+
+    rows = (
+        db.query(Screening, Person)
+        .join(Person, Screening.person_id == Person.id)
+        .filter(
+            Screening.kind == "CHILD_DEVELOPMENT",
+            Screening.clinician_reviewed == False,
+        )
+        .order_by(Screening.created_at.asc())
+        .all()
+    )
+
+    queue = []
+
+    for record, person in rows:
+        item = serialize_screening(record)
+        item["person_name"] = person.name
+        item["date_of_birth"] = person.dob
+        item["review_status"] = "PENDING"
+        queue.append(item)
+
+    return {
+        "count": len(queue),
+        "queue": queue,
+    }
+
+
+# =========================================================
+# CHILD CLINICIAN REVIEW SUBMISSION
+# =========================================================
+
+@router.post("/clinician/child-review/{screening_id}")
+def review_child_screening(
+    screening_id: int,
+    payload: ChildReviewRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+
+    require_clinician(current_user)
+
+    record = (
+        db.query(Screening)
+        .filter(
+            Screening.id == screening_id,
+            Screening.kind == "CHILD_DEVELOPMENT",
+        )
+        .first()
+    )
+
+    if not record:
+        raise HTTPException(
+            status_code=404,
+            detail="Child screening record not found.",
+        )
+
+    if record.clinician_reviewed:
+        raise HTTPException(
+            status_code=409,
+            detail="This screening has already been reviewed.",
+        )
+
+    if payload.decision == "REFER" and not payload.referral_specialty:
+        raise HTTPException(
+            status_code=400,
+            detail="A referral specialty is required.",
+        )
+
+    record.ai_summary = (
+        "Clinician review: " + payload.clinician_note
+    )
+    record.next_action = payload.next_action
+    record.risk = payload.risk
+    record.status = "REVIEWED"
+    record.clinician_reviewed = True
+
+    try:
+        if payload.decision == "REFER":
+            referral = Referral(
+                person_id=record.person_id,
+                specialty=payload.referral_specialty,
+                reason=payload.clinician_note,
+                status="OPEN",
+            )
+            db.add(referral)
+
+        db.commit()
+        db.refresh(record)
+
+    except Exception:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail="Unable to save clinician review.",
+        )
+
+    return {
+        "message": "Child screening review saved.",
+        "screening": serialize_screening(record),
+        "decision": payload.decision,
+        "referral_created": payload.decision == "REFER",
+    }
+
+
+# =========================================================
+# REFERRAL TRACKING
+# =========================================================
+
+@router.get("/referrals")
+def get_referral_tracking(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+
+    if current_user.role == "parent":
+        people = (
+            db.query(Person)
+            .filter(
+                Person.owner_id == current_user.id,
+                Person.type == "child",
+            )
+            .all()
+        )
+
+        person_ids = [person.id for person in people]
+
+        query = db.query(Referral).filter(
+            Referral.person_id.in_(person_ids)
+        ) if person_ids else db.query(Referral).filter(
+            Referral.person_id == -1
+        )
+
+    elif current_user.role == "adult":
+        people = (
+            db.query(Person)
+            .filter(
+                Person.owner_id == current_user.id,
+                Person.type == "adult",
+            )
+            .all()
+        )
+
+        person_ids = [person.id for person in people]
+
+        query = db.query(Referral).filter(
+            Referral.person_id.in_(person_ids)
+        ) if person_ids else db.query(Referral).filter(
+            Referral.person_id == -1
+        )
+
+    elif current_user.role in ("doctor", "admin"):
+        query = db.query(Referral)
+
+    else:
+        raise HTTPException(
+            status_code=403,
+            detail="You cannot access referral records.",
+        )
+
+    referrals = query.order_by(
+        Referral.created_at.desc()
+    ).all()
+
+    result = []
+
+    for referral in referrals:
+        person = db.query(Person).filter(
+            Person.id == referral.person_id
+        ).first()
+
+        result.append({
+            "id": referral.id,
+            "person_id": referral.person_id,
+            "person_name": person.name if person else None,
+            "specialty": referral.specialty,
+            "reason": referral.reason,
+            "status": referral.status,
+            "created_at": (
+                referral.created_at.isoformat()
+                if referral.created_at
+                else None
+            ),
+        })
+
+    return {
+        "count": len(result),
+        "referrals": result,
+    }
+
+
+# =========================================================
+# UPDATE REFERRAL STATUS
+# =========================================================
+
+@router.patch("/clinician/referrals/{referral_id}")
+def update_referral_status(
+    referral_id: int,
+    payload: ReferralStatusRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+
+    require_clinician(current_user)
+
+    referral = (
+        db.query(Referral)
+        .filter(Referral.id == referral_id)
+        .first()
+    )
+
+    if not referral:
+        raise HTTPException(
+            status_code=404,
+            detail="Referral not found.",
+        )
+
+    referral.status = payload.status
+
+    try:
+        db.commit()
+        db.refresh(referral)
+
+    except Exception:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail="Unable to update referral status.",
+        )
+
+    return {
+        "message": "Referral status updated.",
+        "referral_id": referral.id,
+        "status": referral.status,
+    }
+
+
+# =========================================================
+# SCREENING HISTORY
+# =========================================================
+
+def retrieve_screening_history(
+    person_id: int,
+    current_user: User,
+    db: Session,
+) -> dict:
+
+    expected_type = (
+        "adult"
+        if current_user.role == "adult"
+        else "child"
+        if current_user.role == "parent"
+        else None
+    )
+
+    if expected_type is None:
+        raise HTTPException(
+            status_code=403,
+            detail="This account cannot access screening history.",
+        )
+
+    person = (
+        db.query(Person)
+        .filter(
+            Person.id == person_id,
+            Person.owner_id == current_user.id,
+            Person.type == expected_type,
+        )
+        .first()
+    )
+
+    if not person:
+        raise HTTPException(
+            status_code=404,
+            detail="The requested profile was not found.",
+        )
+
+    records = (
+        db.query(Screening)
+        .filter(Screening.person_id == person.id)
+        .order_by(Screening.created_at.desc())
+        .all()
+    )
+
+    return {
+        "person_id": person.id,
+        "person_name": person.name,
+        "screening_count": len(records),
+        "history": [
+            serialize_screening(record)
+            for record in records
+        ],
+    }
+
+
+@router.get("/history")
+def my_screening_history(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+
+    expected_type = (
+        "adult"
+        if current_user.role == "adult"
+        else "child"
+        if current_user.role == "parent"
+        else None
+    )
+
+    if expected_type is None:
+        raise HTTPException(
+            status_code=403,
+            detail="This account cannot access screening history.",
+        )
+
+    person = (
+        db.query(Person)
+        .filter(
+            Person.owner_id == current_user.id,
+            Person.type == expected_type,
+        )
+        .order_by(Person.id.asc())
+        .first()
+    )
+
+    if not person:
+        raise HTTPException(
+            status_code=404,
+            detail="Complete the profile before viewing history.",
+        )
+
+    return retrieve_screening_history(
+        person.id,
+        current_user,
+        db,
+    )
+
+
+@router.get("/history/{person_id}")
+def history(
+    person_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+
+    return retrieve_screening_history(
+        person_id,
+        current_user,
+        db,
+    )

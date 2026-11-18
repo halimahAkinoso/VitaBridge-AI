@@ -1,0 +1,20 @@
+{
+  "expo": {
+    "name": "VitaBridge AI",
+    "slug": "vitabridge-ai",
+    "version": "1.0.0",
+    "scheme": "vitabridge",
+    "platforms": [
+      "ios",
+      "android",
+      "web"
+    ],
+    "extra": {
+      "apiUrl": "http://localhost:8000"
+    },
+    "plugins": [
+      "expo-font",
+      "expo-secure-store"
+    ]
+  }
+}

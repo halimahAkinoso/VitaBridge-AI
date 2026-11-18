@@ -1,0 +1,11 @@
+node_modules/
+.env
+__pycache__/
+*.pyc
+.expo/
+*.db
+*.log
+venv/
+.venv/
+.conda/
+_backup_*/
