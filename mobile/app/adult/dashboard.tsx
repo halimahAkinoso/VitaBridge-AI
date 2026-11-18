@@ -295,8 +295,8 @@ export default function AdultDashboard() {
         <ActionCard
           icon="🧠"
           title="Cognitive Screening"
-          description="Cognitive screening instruments will be made available when the required permissions and clinical approvals are in place."
-          buttonText="Not Yet Available"
+          description="An approved instrument, permissions, and clinical authorization are required before cognitive screening can be enabled."
+          buttonText="Approval Pending"
           disabled
         />
 
@@ -312,7 +312,7 @@ export default function AdultDashboard() {
           title="Screening History"
           description="Review your previous screening records and follow-up information."
           buttonText="View History"
-          onPress={() => navigate('/screening/history')}
+          onPress={() => navigate('/adult/history')}
         />
 
         <ActionCard

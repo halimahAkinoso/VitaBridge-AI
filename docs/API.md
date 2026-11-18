@@ -7,6 +7,9 @@ GET /api/screening/instruments (authenticated, pathway-restricted)
 POST /api/screening/child (optional submission_id makes retries idempotent)
 PUT /api/screening/adult/profile (preferred language: en or ar)
 POST /api/screening/adult
+GET /api/screening/adult/history (authenticated adult account)
+POST /api/screening/adult/baseline
+POST /api/screening/adult/hearing-vision
 POST /api/agent/chat
 POST /api/agent/nudge
 GET /api/doctor/dashboard

@@ -209,17 +209,26 @@ export default function AdultProfileScreen() {
       return false;
     }
 
-    const parsedDate = new Date(`${normalizedDob}T00:00:00`);
+    const [year, month, day] = normalizedDob.split('-').map(Number);
+    const parsedDate = new Date(Date.UTC(year, month - 1, day));
 
     if (
       Number.isNaN(parsedDate.getTime()) ||
-      parsedDate.toISOString().slice(0, 10) !== normalizedDob
+      parsedDate.getUTCFullYear() !== year ||
+      parsedDate.getUTCMonth() !== month - 1 ||
+      parsedDate.getUTCDate() !== day
     ) {
       setFormError('Please enter a valid date of birth.');
       return false;
     }
 
-    if (parsedDate > new Date()) {
+    const today = new Date();
+    const todayUtc = Date.UTC(
+      today.getFullYear(),
+      today.getMonth(),
+      today.getDate()
+    );
+    if (parsedDate.getTime() > todayUtc) {
       setFormError('Date of birth cannot be in the future.');
       return false;
     }

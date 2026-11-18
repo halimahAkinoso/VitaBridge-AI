@@ -287,3 +287,98 @@ def test_adult_profile_accepts_arabic_without_default_nationality():
         },
     )
     assert unsupported_language.status_code == 422
+
+
+def test_adult_history_includes_saved_baseline_and_hearing_vision():
+    registration = client.post(
+        "/api/auth/register",
+        json={
+            "name": "Synthetic History Adult",
+            "email": "adult.history@example.com",
+            "password": PASSWORD,
+            "role": "adult",
+        },
+    )
+    assert registration.status_code == 201, registration.text
+    headers = {
+        "Authorization": f"Bearer {registration.json()['token']}",
+    }
+
+    profile = client.put(
+        "/api/screening/adult/profile",
+        headers=headers,
+        json={
+            "name": "Synthetic History Adult",
+            "dob": date(date.today().year - 60, 1, 1).isoformat(),
+            "sex": "Prefer not to say",
+            "language": "en",
+        },
+    )
+    assert profile.status_code == 200, profile.text
+
+    baseline = client.post(
+        "/api/screening/adult/baseline",
+        headers=headers,
+        json={
+            "health_conditions": ["None of the above"],
+            "blood_pressure_history": "Normal",
+            "sleep_quality": "Good",
+            "physical_activity": "Moderately active",
+            "social_engagement": "Often",
+            "mood": "Good",
+            "memory_concerns": "No concerns",
+        },
+    )
+    assert baseline.status_code == 200, baseline.text
+
+    hearing_vision = client.post(
+        "/api/screening/adult/hearing-vision",
+        headers=headers,
+        json={
+            "responses": {
+                "hearing_difficulty": "Never",
+                "vision_difficulty": "Sometimes",
+            },
+            "completed_at": "2026-01-02T03:04:05Z",
+        },
+    )
+    assert hearing_vision.status_code == 200, hearing_vision.text
+
+    repeated_hearing_vision = client.post(
+        "/api/screening/adult/hearing-vision",
+        headers=headers,
+        json={
+            "responses": {
+                "hearing_difficulty": "Often",
+                "vision_difficulty": "Never",
+            },
+            "completed_at": "2026-02-03T04:05:06Z",
+        },
+    )
+    assert repeated_hearing_vision.status_code == 200, repeated_hearing_vision.text
+
+    history = client.get(
+        "/api/screening/adult/history",
+        headers=headers,
+    )
+    assert history.status_code == 200, history.text
+    data = history.json()
+    assert data["assessment_count"] == 3
+    assessments = {
+        item["assessment"]: item
+        for item in data["assessments"]
+    }
+    assert assessments["adult_health_assessment"]["completed_at"]
+    assert assessments["adult_health_assessment"]["responses"][
+        "sleep_quality"
+    ] == "Good"
+    hearing_history = [
+        item
+        for item in data["assessments"]
+        if item["assessment"] == "adult_hearing_vision"
+    ]
+    assert len(hearing_history) == 2
+    assert hearing_history[0]["completed_at"] == "2026-02-03T04:05:06Z"
+    assert hearing_history[0]["responses"]["hearing_difficulty"] == "Often"
+    assert hearing_history[1]["completed_at"] == "2026-01-02T03:04:05Z"
+    assert hearing_history[1]["responses"]["vision_difficulty"] == "Sometimes"

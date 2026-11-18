@@ -1,6 +1,7 @@
 
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Any, Optional, Literal
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
@@ -628,6 +629,67 @@ def save_adult_profile(
 # ADULT BASELINE ASSESSMENT
 # =========================================================
 
+ADULT_BASELINE_TITLES = {
+    "adult_health_assessment": "Health and wellbeing baseline",
+    "adult_hearing_vision": "Hearing and vision",
+}
+
+
+def append_adult_assessment_history(
+    baseline: dict[str, Any],
+    assessment_id: str,
+    title: str,
+    responses: dict[str, Any],
+    completed_at: str,
+) -> None:
+    history = baseline.get("adult_assessment_history")
+    if not isinstance(history, list):
+        history = []
+
+    if not history:
+        for legacy_id, legacy_title in ADULT_BASELINE_TITLES.items():
+            legacy = baseline.get(legacy_id)
+            if not isinstance(legacy, dict):
+                continue
+            legacy_responses = (
+                legacy.get("responses", {})
+                if legacy_id == "adult_hearing_vision"
+                else {
+                    key: value
+                    for key, value in legacy.items()
+                    if key != "completed_at"
+                }
+            )
+            history.append(
+                {
+                    "id": f"legacy-{legacy_id}",
+                    "assessment": legacy_id,
+                    "title": legacy_title,
+                    "completed_at": legacy.get("completed_at"),
+                    "responses": (
+                        legacy_responses
+                        if isinstance(legacy_responses, dict)
+                        else {}
+                    ),
+                    "status": legacy.get("status", "COMPLETED"),
+                    "clinical_score_generated": False,
+                }
+            )
+
+    history.append(
+        {
+            "id": uuid4().hex,
+            "assessment": assessment_id,
+            "title": title,
+            "completed_at": completed_at,
+            "responses": responses,
+            "status": "COMPLETED",
+            "clinical_score_generated": False,
+        }
+    )
+    baseline["adult_assessment_history"] = history
+
+
 @router.post("/adult/baseline")
 def save_adult_baseline(
     payload: AdultBaselineRequest,
@@ -655,11 +717,24 @@ def save_adult_baseline(
 
     baseline = dict(person.baseline or {})
 
-    baseline["adult_health_assessment"] = (
+    assessment = (
         payload.model_dump()
         if hasattr(payload, "model_dump")
         else payload.dict()
     )
+    assessment["completed_at"] = datetime.now(timezone.utc).isoformat()
+    append_adult_assessment_history(
+        baseline,
+        "adult_health_assessment",
+        ADULT_BASELINE_TITLES["adult_health_assessment"],
+        {
+            key: value
+            for key, value in assessment.items()
+            if key != "completed_at"
+        },
+        assessment["completed_at"],
+    )
+    baseline["adult_health_assessment"] = assessment
 
     person.baseline = baseline
 
@@ -719,12 +794,21 @@ def save_adult_hearing_vision(
         )
 
     baseline = dict(person.baseline or {})
-    baseline["adult_hearing_vision"] = {
+    completed_at = payload.completed_at or datetime.now(timezone.utc).isoformat()
+    assessment = {
         "responses": payload.responses,
-        "completed_at": payload.completed_at or datetime.utcnow().isoformat(),
+        "completed_at": completed_at,
         "status": "COMPLETED",
         "clinical_score_generated": False,
     }
+    append_adult_assessment_history(
+        baseline,
+        "adult_hearing_vision",
+        ADULT_BASELINE_TITLES["adult_hearing_vision"],
+        payload.responses,
+        completed_at,
+    )
+    baseline["adult_hearing_vision"] = assessment
 
     person.baseline = baseline
 
@@ -744,6 +828,100 @@ def save_adult_hearing_vision(
         "assessment": "adult_hearing_vision",
         "clinical_score_generated": False,
     }
+
+
+@router.get("/adult/history")
+def adult_screening_history(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    person = get_adult_person(current_user, db)
+
+    if not person:
+        raise HTTPException(
+            status_code=404,
+            detail="Complete your adult profile before viewing history.",
+        )
+
+    baseline = person.baseline or {}
+    history = baseline.get("adult_assessment_history")
+    assessments = (
+        [item for item in history if isinstance(item, dict)]
+        if isinstance(history, list) and history
+        else []
+    )
+
+    if not assessments:
+        for assessment_id, title in ADULT_BASELINE_TITLES.items():
+            assessment = baseline.get(assessment_id)
+            if not isinstance(assessment, dict):
+                continue
+
+            responses = (
+                assessment.get("responses", {})
+                if assessment_id == "adult_hearing_vision"
+                else {
+                    key: value
+                    for key, value in assessment.items()
+                    if key != "completed_at"
+                }
+            )
+            assessments.append(
+                {
+                    "id": f"legacy-{assessment_id}",
+                    "assessment": assessment_id,
+                    "title": title,
+                    "completed_at": assessment.get("completed_at"),
+                    "responses": (
+                        responses if isinstance(responses, dict) else {}
+                    ),
+                    "status": assessment.get("status", "COMPLETED"),
+                    "clinical_score_generated": False,
+                }
+            )
+
+    screening_records = (
+        db.query(Screening)
+        .filter(Screening.person_id == person.id)
+        .order_by(Screening.created_at.desc())
+        .all()
+    )
+
+    for record in screening_records:
+        raw_answers = record.raw_answers or {}
+        responses = (
+            raw_answers.get("answers", raw_answers)
+            if isinstance(raw_answers, dict)
+            else {}
+        )
+        assessments.append(
+            {
+                "id": f"screening-{record.id}",
+                "assessment": record.kind,
+                "title": record.kind.replace("_", " ").title(),
+                "completed_at": (
+                    record.created_at.isoformat()
+                    if record.created_at
+                    else None
+                ),
+                "responses": responses if isinstance(responses, dict) else {},
+                "status": record.status,
+                "clinical_score_generated": bool(record.scores),
+            }
+        )
+
+    assessments.sort(
+        key=lambda item: item["completed_at"] or "",
+        reverse=True,
+    )
+
+    return {
+        "person_id": person.id,
+        "person_name": person.name,
+        "assessment_count": len(assessments),
+        "assessments": assessments,
+    }
+
 
 # =========================================================
 # ADULT COGNITIVE SCREENING

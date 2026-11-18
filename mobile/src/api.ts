@@ -243,3 +243,6 @@ export const saveAdultHearingVision = async (payload: {
 
   return response.data;
 };
+
+export const getAdultScreeningHistory = () =>
+  api.get('/screening/adult/history');

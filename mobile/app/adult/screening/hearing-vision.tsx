@@ -6,9 +6,9 @@ import {
   StyleSheet,
   ScrollView,
   Pressable,
-  Alert,
   StatusBar,
 } from 'react-native';
+import axios from 'axios';
 import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
 import { COLORS, SHADOW } from '../../../src/theme';
@@ -59,6 +59,8 @@ const visionQuestions: Answer[] = [
 export default function HearingVisionScreening() {
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [submitting, setSubmitting] = useState(false);
+  const [feedback, setFeedback] = useState('');
+  const [requiresSignIn, setRequiresSignIn] = useState(false);
 
   const allQuestions = useMemo(
     () => [...hearingQuestions, ...visionQuestions],
@@ -78,16 +80,15 @@ export default function HearingVisionScreening() {
 
   const handleContinue = async () => {
     if (!isComplete) {
-      Alert.alert(
-        'Incomplete screening',
-        'Please answer all questions before continuing.'
-      );
+      setFeedback('Please answer all questions before continuing.');
       return;
     }
 
     if (submitting) return;
 
     setSubmitting(true);
+    setFeedback('');
+    setRequiresSignIn(false);
 
     try {
       const payload = {
@@ -96,23 +97,25 @@ export default function HearingVisionScreening() {
       };
 
       await saveAdultHearingVision(payload);
+      router.replace('/adult/dashboard');
+    } catch (error: unknown) {
+      console.error('Adult hearing and vision save failed:', error);
 
-      Alert.alert(
-        'Screening saved',
-        'Your hearing and vision responses have been saved successfully.',
-        [
-          {
-            text: 'Continue',
-            onPress: () => router.replace('/adult/dashboard'),
-          },
-        ]
+      const requestError = axios.isAxiosError<{ detail?: unknown }>(error)
+        ? error
+        : null;
+      const needsAuthentication =
+        requestError?.response?.status === 401;
+      const detail = requestError?.response?.data?.detail;
+
+      setRequiresSignIn(needsAuthentication);
+      setFeedback(
+        needsAuthentication
+          ? 'Your session is not authenticated. Sign in again before saving these responses.'
+          : typeof detail === 'string'
+            ? detail
+            : 'We could not save your responses. Please check your connection and try again.'
       );
-    } catch (error: any) {
-      const message =
-        error?.response?.data?.detail ||
-        'We could not save your responses. Please check your connection and try again.';
-
-      Alert.alert('Unable to save screening', String(message));
     } finally {
       setSubmitting(false);
     }
@@ -303,6 +306,28 @@ export default function HearingVisionScreening() {
             healthcare professional.
           </Text>
         </View>
+
+        {feedback ? (
+          <View
+            style={styles.feedbackBox}
+            accessibilityRole="alert"
+            accessibilityLiveRegion="polite"
+          >
+            <Text style={styles.feedbackText}>{feedback}</Text>
+            {requiresSignIn ? (
+              <Pressable
+                onPress={() =>
+                  router.replace({
+                    pathname: '/(auth)/login',
+                    params: { pathway: 'adult' },
+                  })
+                }
+              >
+                <Text style={styles.signInText}>Sign in to continue</Text>
+              </Pressable>
+            ) : null}
+          </View>
+        ) : null}
 
         <Pressable
           style={[
@@ -529,6 +554,26 @@ const styles = StyleSheet.create({
     color: COLORS.text,
     fontSize: 12,
     lineHeight: 19,
+  },
+  feedbackBox: {
+    backgroundColor: '#FCECEC',
+    borderColor: '#E8B8B8',
+    borderWidth: 1,
+    borderRadius: 11,
+    marginTop: 16,
+    padding: 13,
+  },
+  feedbackText: {
+    color: COLORS.danger,
+    fontSize: 13,
+    lineHeight: 19,
+  },
+  signInText: {
+    color: COLORS.teal,
+    fontSize: 14,
+    fontWeight: '700',
+    marginTop: 9,
+    textDecorationLine: 'underline',
   },
   continueButton: {
     minHeight: 54,
