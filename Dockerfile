@@ -22,4 +22,4 @@ COPY backend/ ./
 COPY --from=web-build /workspace/mobile/dist ./web-dist
 
 EXPOSE 8000
-CMD ["sh", "-c", "python scripts/bootstrap_demo_admin.py && uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+CMD ["sh", "-c", "python -m scripts.bootstrap_demo_admin && uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
