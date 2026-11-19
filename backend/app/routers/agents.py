@@ -18,6 +18,7 @@ from app.models import (
 )
 from app.routers.users import get_current_user
 from app.services.agent import build_nura_context
+from app.services.audit import AuditUnavailableError, record_ai_event
 from app.services.clinical_question_planner import build_monitoring_plan
 from app.services.safety import check_red_flags, safety_disclaimer
 
@@ -41,6 +42,35 @@ class NudgeRequest(BaseModel):
 
 class MonitoringPlanRequest(BaseModel):
     check_in: dict = Field(default_factory=dict)
+
+
+def _audit_agent_output(
+    db: Session,
+    user: User,
+    operation: str,
+    input_payload: object,
+    output: object,
+    explanation: dict,
+) -> None:
+    audit_explanation = dict(explanation)
+    if isinstance(input_payload, dict) and isinstance(input_payload.get("person_id"), int):
+        audit_explanation.setdefault("person_id", input_payload["person_id"])
+    try:
+        record_ai_event(
+            db,
+            user.id,
+            operation,
+            "nura-local-rules-v1",
+            input_payload,
+            output,
+            "RECOMMENDATION_RETURNED",
+            audit_explanation,
+        )
+    except AuditUnavailableError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Audit storage is unavailable; the recommendation was not returned.",
+        ) from exc
 
 
 def _get_person(current_user: User, db: Session) -> Person:
@@ -535,7 +565,20 @@ def prevention_overview(
             status_code=403,
             detail="The adult prevention overview requires an adult account.",
         )
-    return _build_overview(person, db)
+    overview = _build_overview(person, db)
+    _audit_agent_output(
+        db,
+        current_user,
+        "nura_overview",
+        {"person_id": person.id},
+        overview,
+        {
+            "method": "saved_context_rules_v1",
+            "action_key": overview["next_best_action"]["title"],
+            "source": "profile_assessment_checkin_referrals",
+        },
+    )
+    return overview
 
 
 @router.get("/results")
@@ -584,7 +627,7 @@ def adult_action_plan(
             "source": "saved_profile_and_assessments",
         }
 
-    return {
+    result = {
         "actions": [action],
         "count": 1,
         "result_status": result["status"],
@@ -594,6 +637,19 @@ def adult_action_plan(
             "does not book appointments or replace clinician advice."
         ),
     }
+    _audit_agent_output(
+        db,
+        current_user,
+        "nura_plan",
+        {"person_id": person.id},
+        result,
+        {
+            "method": "saved_context_rules_v1",
+            "action_source": action["source"],
+            "action_key": action.get("title"),
+        },
+    )
+    return result
 
 
 @router.post("/check-in")
@@ -980,6 +1036,66 @@ def _adult_nura_reply(
             " وتشير المعلومات التي قدمتها بنفسك إلى "
             + "، ".join(reported_context)
             + "؛ وقد تساعد في فهم السياق لكنها لا تثبت سبباً."
+        )
+
+    additional_features = nura_context["additional_information_features"]
+    feature_notes = []
+    if additional_features.get("sleep_hours") is not None:
+        feature_notes.append(
+            (
+                f"مدة النوم المذكورة تقريباً {additional_features['sleep_hours']} ساعات"
+                if arabic
+                else f"your additional note reports about {additional_features['sleep_hours']} hours of sleep"
+            )
+        )
+    if additional_features.get("sleep_issue") is True:
+        feature_notes.append(
+            "وجود صعوبة في النوم"
+            if arabic
+            else "a self-reported sleep concern"
+        )
+    if additional_features.get("hearing_issue") is True:
+        feature_notes.append(
+            "صعوبة في السمع"
+            if arabic
+            else "hearing difficulty"
+        )
+    if additional_features.get("memory_issue") is True:
+        feature_notes.append(
+            "نسيان الأسماء أو أمور أخرى"
+            if arabic
+            else "forgetfulness, including names"
+        )
+    if additional_features.get("functional_independent") is False:
+        feature_notes.append(
+            "الحاجة إلى مساعدة في بعض المهام اليومية"
+            if arabic
+            else "a report of needing help with daily tasks"
+        )
+    reminder_preference = additional_features.get("reminder_preference")
+    if reminder_preference:
+        feature_notes.append(
+            (
+                "تفضيل التذكير مساءً"
+                if reminder_preference == "evening"
+                else "تفضيل التذكير صباحاً"
+            )
+            if arabic
+            else (
+                "a preference for evening reminders"
+                if reminder_preference == "evening"
+                else "a preference for morning reminders"
+            )
+        )
+    if feature_notes:
+        factors += (
+            (
+                "وتذكر المعلومات الإضافية التي قدمتها: "
+                if arabic
+                else " Your saved additional notes also mention: "
+            )
+            + "، ".join(feature_notes)
+            + "."
         )
 
     next_action = overview["next_best_action"]
@@ -1472,13 +1588,27 @@ def nura_context(
     person = _get_person(current_user, db)
     if current_user.role == "adult":
         overview = _build_overview(person, db)
-        return {
+        result = {
             "person_type": "adult",
             "person_name": person.name,
             "language": person.language or "en",
             "next_best_action": overview["next_best_action"],
         }
-    return _child_nura_context(person, db)
+    else:
+        result = _child_nura_context(person, db)
+    _audit_agent_output(
+        db,
+        current_user,
+        "nura_context",
+        {"person_id": person.id},
+        result,
+        {
+            "method": "saved_context_rules_v1",
+            "action_key": result.get("next_best_action", {}).get("title"),
+            "population": person.type,
+        },
+    )
+    return result
 
 
 @router.post("/chat")
@@ -1503,11 +1633,23 @@ def chat(
                 "you trust."
             )
         )
-        return {
+        result = {
             "reply": reply,
             "urgent_human_support": True,
             "disclaimer": safety_disclaimer(),
         }
+        _audit_agent_output(
+            db,
+            current_user,
+            "nura_chat_urgent",
+            {"person_id": person.id, "message": message},
+            result,
+            {
+                "method": "red_flag_escalation_rules_v1",
+                "matched_rule_codes": red_flags,
+            },
+        )
+        return result
 
     if current_user.role == "adult":
         overview = _build_overview(person, db)
@@ -1516,17 +1658,36 @@ def chat(
         context = _child_nura_context(person, db)
         reply = _child_nura_reply(message, person, context)
 
-    return {
+    result = {
         "reply": reply,
         "urgent_human_support": False,
         "disclaimer": safety_disclaimer(),
     }
+    _audit_agent_output(
+        db,
+        current_user,
+        "nura_chat",
+        {"person_id": person.id, "message": message},
+        result,
+        {
+            "method": "context_grounded_template_v1",
+            "population": person.type,
+            "clinical_result_source": (
+                "clinician_review"
+                if current_user.role == "adult"
+                and _clinical_result(person, db)["available"]
+                else "saved_self_report_or_pending_review"
+            ),
+        },
+    )
+    return result
 
 
 @router.post("/nudge")
 def nudge(
     payload: NudgeRequest,
     current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     barrier = payload.barrier.strip().lower()
     prompt = {
@@ -1537,7 +1698,7 @@ def nudge(
         "cost": "Would you like to ask your care team about available coverage or lower-cost options?",
         "language": "Would you prefer to discuss this in another language with your care team?",
     }
-    return {
+    result = {
         "barrier": barrier,
         "support_prompt": prompt.get(
             barrier,
@@ -1546,6 +1707,18 @@ def nudge(
         "booking_available": False,
         "message": "Nura cannot verify clinic availability or book appointments.",
     }
+    _audit_agent_output(
+        db,
+        current_user,
+        "nura_nudge",
+        barrier,
+        result,
+        {
+            "method": "barrier_prompt_map_v1",
+            "barrier_code": barrier if barrier in prompt else "other",
+        },
+    )
+    return result
 
 
 @router.post("/proactive-check")
@@ -1560,12 +1733,25 @@ def proactive(
             detail="The adult prevention overview requires an adult account.",
         )
     overview = _build_overview(person, db)
-    return {
+    result = {
         "next_best_action": overview["next_best_action"],
         "today_check_in": overview["today_check_in"],
         "open_referrals": overview["open_referrals"],
         "source": "Saved profile, assessment, check-in, and referral records.",
     }
+    _audit_agent_output(
+        db,
+        current_user,
+        "nura_proactive_check",
+        {"person_id": person.id},
+        result,
+        {
+            "method": "saved_context_rules_v1",
+            "action_key": overview["next_best_action"]["title"],
+            "source": "profile_assessment_checkin_referrals",
+        },
+    )
+    return result
 
 
 @router.post("/monitoring-plan")

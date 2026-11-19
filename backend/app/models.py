@@ -116,3 +116,17 @@ class AdultClinicalReview(Base):
     next_action = Column(String(255), nullable=False)
     referral_specialty = Column(String(100), nullable=True)
     created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
+
+
+class AIInferenceAudit(Base):
+    __tablename__ = "ai_inference_audits"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    operation = Column(String(80), nullable=False)
+    model_id = Column(String(150), nullable=False)
+    input_sha256 = Column(String(64), nullable=False)
+    output_sha256 = Column(String(64), nullable=False)
+    result_code = Column(String(40), nullable=False)
+    explanation = Column(JSON, nullable=False, default=dict)
+    created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)

@@ -17,6 +17,7 @@ from app.core.database import engine, Base, ensure_screening_submission_id
 
 # Import application routers
 from app.routers import (
+    ai,
     auth,
     users,
     screening,
@@ -89,6 +90,11 @@ app.include_router(
     notifications.router,
     prefix="/api/notifications",
     tags=["Notifications"],
+)
+app.include_router(
+    ai.router,
+    prefix="/api",
+    tags=["Clinical AI decision support"],
 )
 WEB_ROOT = Path(__file__).resolve().parents[1] / "web-dist"
 

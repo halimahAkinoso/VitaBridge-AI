@@ -19,6 +19,7 @@ from app.models import (
 )
 from app.routers.users import get_current_user
 from app.services.instrument_registry import list_instruments
+from app.services.clinical_nlp import extract_features
 
 
 router = APIRouter()
@@ -753,6 +754,13 @@ def save_adult_baseline(
         if hasattr(payload, "model_dump")
         else payload.dict()
     )
+    if assessment["additional_notes"].strip():
+        assessment["additional_information_features"] = extract_features(
+            assessment["additional_notes"],
+            person.language or "en",
+        )
+    else:
+        assessment["additional_information_features"] = None
     assessment["completed_at"] = datetime.now(timezone.utc).isoformat()
     append_adult_assessment_history(
         baseline,
@@ -761,7 +769,9 @@ def save_adult_baseline(
         {
             key: value
             for key, value in assessment.items()
-            if key != "completed_at" and value is not None and value != ""
+            if key not in {"completed_at", "additional_notes"}
+            and value is not None
+            and value != ""
         },
         assessment["completed_at"],
     )

@@ -6,7 +6,7 @@ from argon2 import PasswordHasher
 from app.core.database import SessionLocal
 from app.core.security import hash_password
 from app.main import app
-from app.models import Person, Screening, User
+from app.models import AIInferenceAudit, Person, Screening, User
 
 
 client = TestClient(app)
@@ -336,6 +336,10 @@ def test_adult_history_includes_saved_baseline_and_hearing_vision():
             "mood": "Good",
             "memory_concerns": "No concerns",
             "family_history": "Not sure",
+            "additional_notes": (
+                "I sleep 5-6 hours, forgetful with names, struggle to hear in noisy places, "
+                "and prefer evening reminders."
+            ),
         },
     )
     assert baseline.status_code == 200, baseline.text
@@ -385,6 +389,23 @@ def test_adult_history_includes_saved_baseline_and_hearing_vision():
         "blood_glucose_mmol_l"
     ] == 5.2
     assert "additional_notes" not in assessments["adult_health_assessment"]["responses"]
+    additional_features = assessments["adult_health_assessment"]["responses"][
+        "additional_information_features"
+    ]
+    assert additional_features["sleep_hours"] == 5.5
+    assert additional_features["memory_issue"] is True
+    assert additional_features["hearing_issue"] is True
+    assert additional_features["reminder_preference"] == "evening"
+
+    nura_reply = client.post(
+        "/api/agent/chat",
+        headers=headers,
+        json={"message": "Explain what could be affecting my result."},
+    )
+    assert nura_reply.status_code == 200, nura_reply.text
+    assert "5.5 hours of sleep" in nura_reply.json()["reply"]
+    assert "forgetfulness, including names" in nura_reply.json()["reply"]
+    assert "preference for evening reminders" in nura_reply.json()["reply"]
     hearing_history = [
         item
         for item in data["assessments"]
@@ -500,6 +521,32 @@ def test_adult_prevention_agent_uses_real_data_and_records_check_ins():
     assert urgent_answer.json()["urgent_human_support"] is True
     assert client.get("/api/agent/overview").status_code == 401
 
+    db = SessionLocal()
+    try:
+        audit_operations = {
+            entry.operation
+            for entry in db.query(AIInferenceAudit)
+            .filter(AIInferenceAudit.user_id == registration.json()["user"]["id"])
+            .all()
+        }
+        assert {
+            "nura_overview",
+            "nura_chat",
+            "nura_chat_urgent",
+        }.issubset(audit_operations)
+        chat_audit = (
+            db.query(AIInferenceAudit)
+            .filter(
+                AIInferenceAudit.user_id == registration.json()["user"]["id"],
+                AIInferenceAudit.operation == "nura_chat",
+            )
+            .first()
+        )
+        assert chat_audit.explanation["method"] == "context_grounded_template_v1"
+        assert chat_audit.explanation["person_id"] == profile.json()["profile"]["id"]
+    finally:
+        db.close()
+
 
 def test_passport_and_notifications_are_account_scoped():
     first = client.post(
@@ -583,6 +630,135 @@ def test_passport_and_notifications_are_account_scoped():
         f"/api/passport/{person_id}",
         headers=other_headers,
     ).status_code == 404
+
+
+def test_ai_endpoints_require_auth_audit_without_storing_inputs_and_gate_fusion(monkeypatch):
+    monkeypatch.delenv("CLINICAL_AI_ENABLED", raising=False)
+    monkeypatch.delenv("DATA_RESIDENCY_REGION", raising=False)
+    adult = client.post(
+        "/api/auth/register",
+        json={
+            "name": "Synthetic AI Adult",
+            "email": "adult.ai@example.com",
+            "password": PASSWORD,
+            "role": "adult",
+        },
+    )
+    assert adult.status_code == 201, adult.text
+    adult_headers = {
+        "Authorization": f"Bearer {adult.json()['token']}",
+    }
+    disabled = client.post(
+        "/api/nlp/extract",
+        headers=adult_headers,
+        json={"text": "I forget names.", "language": "en"},
+    )
+    assert disabled.status_code == 503
+    monkeypatch.setenv("CLINICAL_AI_ENABLED", "true")
+    monkeypatch.setenv("DATA_RESIDENCY_REGION", "uaecentral")
+    profile = client.put(
+        "/api/screening/adult/profile",
+        headers=adult_headers,
+        json={
+            "name": "Synthetic AI Adult",
+            "dob": date(date.today().year - 62, 1, 1).isoformat(),
+            "sex": "Prefer not to say",
+            "language": "en",
+        },
+    )
+    assert profile.status_code == 200, profile.text
+
+    text = "I forget names and sleep 5-6 hours."
+    extraction = client.post(
+        "/api/nlp/extract",
+        headers=adult_headers,
+        json={"text": text, "language": "en"},
+    )
+    assert extraction.status_code == 200, extraction.text
+    assert extraction.json()["memory_issue"] is True
+    assert extraction.json()["sleep_hours"] == 5.5
+    assert client.post(
+        "/api/nlp/extract",
+        json={"text": text, "language": "en"},
+    ).status_code == 401
+    assert client.post(
+        "/api/risk/fuse",
+        headers=adult_headers,
+        json={"moca": {"current": 24, "baseline": 26}},
+    ).status_code == 403
+    monkeypatch.setenv("SPEECH_MODEL_ENABLED", "false")
+    unavailable_speech = client.post(
+        "/api/speech/analyze",
+        headers=adult_headers,
+        files={"audio": ("sample.wav", b"synthetic audio", "audio/wav")},
+        data={
+            "person_id": profile.json()["profile"]["id"],
+            "language": "en",
+            "consent": "true",
+        },
+    )
+    assert unavailable_speech.status_code == 503
+    assert "disabled" in unavailable_speech.json()["detail"].lower()
+
+    db = SessionLocal()
+    try:
+        db.add(
+            User(
+                name="Synthetic AI Doctor",
+                email="doctor.ai@example.com",
+                role="doctor",
+                password_hash=hash_password(PASSWORD),
+            )
+        )
+        db.commit()
+        doctor_id = db.query(User).filter_by(email="doctor.ai@example.com").one().id
+    finally:
+        db.close()
+    doctor_login = client.post(
+        "/api/auth/login",
+        json={"email": "doctor.ai@example.com", "password": PASSWORD},
+    )
+    assert doctor_login.status_code == 200, doctor_login.text
+
+    fused = client.post(
+        "/api/risk/fuse",
+        headers={
+            "Authorization": f"Bearer {doctor_login.json()['token']}",
+        },
+        json={
+            "moca": {"current": 24, "baseline": 26},
+            "sleep": {"hours": 5.5},
+            "hearing": {"difficulty": "Often", "follow_up_open": True},
+        },
+    )
+    assert fused.status_code == 200, fused.text
+    assert fused.json()["status"] == "NOT_ASSESSED"
+    assert fused.json()["risk"] == "NOT_ASSESSED"
+
+    db = SessionLocal()
+    try:
+        audits = (
+            db.query(AIInferenceAudit)
+            .filter(AIInferenceAudit.user_id.in_((adult.json()["user"]["id"], doctor_id)))
+            .all()
+        )
+        assert {item.operation for item in audits} == {
+            "nlp_extract",
+            "risk_fuse",
+            "speech_analyze",
+        }
+        assert all(text not in item.input_sha256 for item in audits)
+        assert all(item.output_sha256 for item in audits)
+        assert all(isinstance(item.explanation, dict) for item in audits)
+        assert next(
+            item for item in audits if item.operation == "risk_fuse"
+        ).explanation["status"] == "NOT_ASSESSED"
+        speech_audit = next(
+            item for item in audits if item.operation == "speech_analyze"
+        )
+        assert speech_audit.explanation["person_id"] == profile.json()["profile"]["id"]
+    finally:
+        db.close()
 
 
 def test_arabic_adult_profile_receives_nura_guidance_in_arabic():
