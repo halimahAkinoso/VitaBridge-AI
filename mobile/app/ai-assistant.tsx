@@ -16,7 +16,7 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 
 import { Screen } from '../components/Screen';
 import { COLORS } from '../src/theme';
-import { agentChat, getPreventionOverview } from '../src/api';
+import { agentChat, getNuraContext } from '../src/api';
 
 type Message = {
   id: string;
@@ -24,8 +24,39 @@ type Message = {
   text: string;
 };
 
+function NuraMessageText({
+  message,
+  isArabic,
+}: {
+  message: Message;
+  isArabic: boolean;
+}) {
+  const start = message.role === 'nura' ? message.text.indexOf('**') : -1;
+  const end = start >= 0 ? message.text.indexOf('**', start + 2) : -1;
+  const textStyle = [
+    styles.messageText,
+    message.role === 'you' && styles.userMessageText,
+    isArabic && styles.rtlText,
+  ];
+
+  if (start < 0 || end < 0) {
+    return <Text style={textStyle}>{message.text}</Text>;
+  }
+
+  return (
+    <Text style={textStyle}>
+      {message.text.slice(0, start)}
+      <Text style={styles.boldAction}>
+        {message.text.slice(start + 2, end)}
+      </Text>
+      {message.text.slice(end + 2)}
+    </Text>
+  );
+}
+
 export default function NuraAssistantScreen() {
   const [isArabic, setIsArabic] = useState(false);
+  const [isChild, setIsChild] = useState(false);
   const [messages, setMessages] = useState<Message[]>([
     {
       id: 'welcome',
@@ -40,10 +71,12 @@ export default function NuraAssistantScreen() {
   const scrollRef = useRef<ScrollView>(null);
 
   useEffect(() => {
-    getPreventionOverview()
+    getNuraContext()
       .then(({ data }) => {
         const arabic = data.language === 'ar';
+        const child = data.person_type === 'child';
         setIsArabic(arabic);
+        setIsChild(child);
         setNextAction(data.next_best_action?.detail || '');
         setMessages((items) =>
           items.length === 1 && items[0].id === 'welcome'
@@ -51,8 +84,12 @@ export default function NuraAssistantScreen() {
                 {
                   ...items[0],
                   text: arabic
-                    ? 'مرحباً، أنا نورة. أشرح خطوات الوقاية المسجلة وأساعدك على التفكير في العوائق وتجهيز أسئلة لفريق الرعاية. لا أقدم تشخيصاً ولا أحجز المواعيد.'
-                    : "Hello, I'm Nura. I can explain your saved prevention steps, help you think through a barrier, and suggest questions for your care team. I do not diagnose or book appointments.",
+                    ? child
+                      ? 'مرحباً، أنا نورة. أشرح سجل نمو طفلك وخطوات المتابعة المسجلة، وأساعدك في الاستعداد لزيارة الطفل الوقائية. لا أقدم تشخيصاً.'
+                      : 'مرحباً، أنا نورة. أشرح نتائجك وخطوات الوقاية المسجلة وأساعدك على التفكير في العوائق وتجهيز أسئلة لفريق الرعاية. لا أقدم تشخيصاً.'
+                    : child
+                      ? "Hello, I'm Nura. I can explain your child's saved developmental records and follow-up steps, and help you prepare for a Well-Child Visit. I do not diagnose."
+                      : "Hello, I'm Nura. I can explain your saved results and prevention steps, help you think through a barrier, and suggest questions for your care team. I do not diagnose.",
                 },
               ]
             : items
@@ -60,7 +97,7 @@ export default function NuraAssistantScreen() {
       })
       .catch((requestError: unknown) => {
         console.error('Unable to load Nura context:', requestError);
-        setError('Sign in with an adult account to use Nura.');
+        setError('Sign in with an adult or parent account and complete the health profile to use Nura.');
       });
   }, []);
 
@@ -102,9 +139,13 @@ export default function NuraAssistantScreen() {
     }
   };
 
-  const quickPrompts = isArabic
-    ? ['اشرح نتيجتي', 'ما خطوتي التالية؟', 'اشرح فحص الإدراك', 'فاتني موعد متابعة']
-    : ['Explain my result', 'What is my next step?', 'Explain cognitive screening', 'I missed a follow-up'];
+  const quickPrompts = isChild
+    ? isArabic
+      ? ['اشرح سجل نمو طفلي', 'ما خطوتنا التالية؟', 'ما الزيارة الوقائية المستحقة؟', 'كيف أتابع التطور؟']
+      : ["Explain my child's screening", 'What is our next step?', 'Which Well-Child Visit is due?', 'How can I support development?']
+    : isArabic
+      ? ['اشرح نتيجتي', 'ما خطوتي التالية؟', 'اشرح فحص الإدراك', 'فاتني موعد متابعة']
+      : ['Explain my result', 'What is my next step?', 'Explain cognitive screening', 'I missed a follow-up'];
 
   return (
     <Screen>
@@ -130,7 +171,9 @@ export default function NuraAssistantScreen() {
         {nextAction ? (
           <View style={styles.nextAction}>
             <Text style={styles.nextActionLabel}>
-              {isArabic ? 'خطوتك التالية' : 'YOUR NEXT STEP'}
+              {isArabic
+                ? isChild ? 'الخطوة التالية' : 'خطوتك التالية'
+                : isChild ? 'YOUR CHILD’S NEXT STEP' : 'YOUR NEXT STEP'}
             </Text>
             <Text style={[styles.nextActionText, isArabic && styles.rtlText]}>
               {nextAction}
@@ -160,15 +203,7 @@ export default function NuraAssistantScreen() {
                     ? 'نورة'
                     : 'Nura'}
               </Text>
-              <Text
-                style={[
-                  styles.messageText,
-                  message.role === 'you' && styles.userMessageText,
-                  isArabic && styles.rtlText,
-                ]}
-              >
-                {message.text}
-              </Text>
+              <NuraMessageText message={message} isArabic={isArabic} />
             </View>
           ))}
           {sending ? (
@@ -255,6 +290,7 @@ const styles = StyleSheet.create({
   messageRole: { color: COLORS.teal, fontSize: 10, fontWeight: '900', marginBottom: 5 },
   rtlText: { textAlign: 'right', writingDirection: 'rtl' },
   messageText: { color: COLORS.text, fontSize: 13, lineHeight: 20 },
+  boldAction: { color: COLORS.text, fontWeight: '900' },
   userMessageText: { color: '#FFFFFF' },
   typing: { flexDirection: 'row', alignItems: 'center', gap: 8, padding: 10 },
   typingText: { color: COLORS.muted, fontSize: 11 },

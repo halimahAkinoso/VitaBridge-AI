@@ -214,6 +214,9 @@ export const saveAdultBaseline = (
 export const agentChat = (message: string) =>
   api.post('/agent/chat', { message });
 
+export const getNuraContext = () =>
+  api.get('/agent/nura-context');
+
 export const getPreventionOverview = () =>
   api.get('/agent/overview');
 

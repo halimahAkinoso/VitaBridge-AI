@@ -8,8 +8,16 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.models import AdultClinicalReview, Person, Referral, User, WellbeingCheckIn
+from app.models import (
+    AdultClinicalReview,
+    Person,
+    Referral,
+    Screening,
+    User,
+    WellbeingCheckIn,
+)
 from app.routers.users import get_current_user
+from app.services.agent import build_nura_context
 from app.services.clinical_question_planner import build_monitoring_plan
 from app.services.safety import check_red_flags, safety_disclaimer
 
@@ -713,6 +721,766 @@ def list_daily_check_ins(
     }
 
 
+def _saved_age(person: Person) -> tuple[Optional[int], Optional[int]]:
+    if not person.dob:
+        return None, None
+    try:
+        dob = date.fromisoformat(person.dob.replace("/", "-"))
+    except ValueError:
+        return None, None
+
+    today = date.today()
+    years = today.year - dob.year - (
+        (today.month, today.day) < (dob.month, dob.day)
+    )
+    months = (today.year - dob.year) * 12 + today.month - dob.month
+    if today.day < dob.day:
+        months -= 1
+    return years, months
+
+
+def _format_nura_reply(
+    language: str,
+    meaning: str,
+    factors: str,
+    improvements: list[str],
+    next_steps: str,
+    question: str,
+    action: str,
+) -> str:
+    if language == "ar":
+        return (
+            f"1. ماذا يعني ذلك لك\n{meaning}\n\n"
+            f"2. ما الذي قد يؤثر فيه\n{factors}\n\n"
+            "3. ما الذي يمكنك تحسينه\n"
+            + "\n".join(f"- {item}" for item in improvements)
+            + f"\n\n4. ما الذي سيحدث بعد ذلك\n{next_steps} {question}\n\n"
+            f"5. أفضل خطوة تالية واحدة\n**{action}**"
+        )
+    return (
+        f"1. WHAT THIS MEANS FOR YOU\n{meaning}\n\n"
+        f"2. WHAT COULD BE AFFECTING IT\n{factors}\n\n"
+        "3. WHAT YOU CAN IMPROVE\n"
+        + "\n".join(f"- {item}" for item in improvements)
+        + f"\n\n4. WHAT HAPPENS NEXT\n{next_steps} {question}\n\n"
+        f"5. ONE NEXT BEST ACTION\n**{action}**"
+    )
+
+
+def _saved_value(value, arabic: bool) -> str:
+    if value is None or value == "":
+        return "غير مسجل" if arabic else "not recorded"
+    if not arabic:
+        return str(value)
+    translations = {
+        "Never": "أبداً",
+        "Sometimes": "أحياناً",
+        "Often": "غالباً",
+        "Always": "دائماً",
+        "No": "لا",
+        "Yes": "نعم",
+        "Good": "جيد",
+        "Poor": "ضعيف",
+        "Very poor": "ضعيف جداً",
+        "Excellent": "ممتاز",
+        "Prefer not to say": "أفضل عدم الإجابة",
+        "en": "الإنجليزية",
+        "ar": "العربية",
+    }
+    return translations.get(str(value), str(value))
+
+
+def _adult_nura_reply(
+    message: str,
+    person: Person,
+    db: Session,
+    overview: dict,
+) -> str:
+    language = person.language or "en"
+    arabic = language == "ar"
+    lowered = message.lower()
+    baseline = _assessment(person, "adult_health_assessment").get(
+        "responses", {}
+    )
+    sensory = _assessment(person, "adult_hearing_vision").get(
+        "responses", {}
+    )
+    baseline = baseline if isinstance(baseline, dict) else {}
+    sensory = sensory if isinstance(sensory, dict) else {}
+    result = _clinical_result(person, db)
+    age, _ = _saved_age(person)
+    check_in = overview.get("today_check_in")
+    if not check_in:
+        latest_check_in = (
+            db.query(WellbeingCheckIn)
+            .filter(WellbeingCheckIn.person_id == person.id)
+            .order_by(WellbeingCheckIn.local_date.desc())
+            .first()
+        )
+        if latest_check_in:
+            check_in = {
+                "date": latest_check_in.local_date,
+                "sleep_hours": latest_check_in.sleep_hours,
+                "mood_score": latest_check_in.mood_score,
+            }
+    nura_context = build_nura_context(
+        person=person,
+        age=age,
+        baseline=baseline,
+        sensory=sensory,
+        check_in=check_in,
+        clinical_result=result,
+        open_loops=overview.get("open_referrals", []),
+        next_action=overview["next_best_action"],
+    )
+    name = nura_context["person"]["name"] or ("" if arabic else "You")
+
+    measurements = []
+    for key, label in (
+        ("systolic_bp_mmhg", "ضغط الدم الانقباضي" if arabic else "systolic BP"),
+        ("diastolic_bp_mmhg", "ضغط الدم الانبساطي" if arabic else "diastolic BP"),
+        ("blood_glucose_mmol_l", "الجلوكوز" if arabic else "glucose"),
+        ("cholesterol_mmol_l", "الكوليسترول" if arabic else "cholesterol"),
+        ("weight_kg", "الوزن" if arabic else "weight"),
+    ):
+        value = nura_context["baseline"]["measurements"].get(key)
+        if value is not None:
+            measurements.append(f"{label} {value}")
+    check_in = check_in or {}
+    sleep_hours = nura_context["baseline"]["sleep_hours"]
+    if sleep_hours is not None:
+        measurements.append(
+            f"{'ساعات النوم' if arabic else 'sleep'} {sleep_hours}"
+        )
+
+    if age is None:
+        identity = name if arabic else f"{name}"
+    elif arabic:
+        identity = f"{name}، بعمر {age} عاماً"
+    else:
+        identity = f"{name}, age {age}"
+
+    if result["available"]:
+        status = nura_context["status"]
+        risk = nura_context["risk"]
+        if arabic:
+            meaning = (
+                f"{identity}: سجّل الطبيب الحالة {status} ومستوى المخاطر "
+                f"{risk}. هذه نتيجة أدخلها الطبيب وليست تشخيصاً، ولا توجد "
+                "درجة معرفية معتمدة محفوظة. "
+            )
+        else:
+            meaning = (
+                f"{identity}: your clinician recorded status {status} and "
+                f"risk {risk}. These clinician-entered results are not a diagnosis; "
+                "no approved cognitive score is saved. "
+            )
+    elif arabic:
+        meaning = (
+            f"{identity}: إجاباتك الصحية معلومات تقدمها بنفسك، ولا توجد "
+            "حالة مسجلة من الطبيب. لا توجد درجة معرفية معتمدة، بما فيها MoCA. "
+            "الفحص يحدد الحاجة للمتابعة ولا يشخّص المرض. "
+        )
+    else:
+        meaning = (
+            f"{identity}: your health answers are self-reported, and no "
+            "clinician-entered status is saved yet. No approved cognitive score, "
+            "including MoCA, is available. "
+            "Screening identifies risk, not disease. "
+        )
+
+    if measurements:
+        meaning += (
+            "القياسات المحفوظة: " if arabic else "Saved measurements: "
+        ) + ", ".join(measurements) + "."
+    else:
+        meaning += (
+            "لا توجد قياسات رقمية محفوظة."
+            if arabic
+            else "No numeric measurements are saved."
+        )
+
+    hearing = _saved_value(sensory.get("hearing_difficulty"), arabic)
+    vision = _saved_value(sensory.get("vision_difficulty"), arabic)
+    sleep_quality = _saved_value(baseline.get("sleep_quality"), arabic)
+    mood = _saved_value(
+        check_in.get("mood_score")
+        if check_in.get("mood_score") is not None
+        else baseline.get("mood"),
+        arabic,
+    )
+    education = _saved_value(person.education, arabic)
+    culture = _saved_value(person.culture, arabic)
+    language_label = _saved_value(person.language, arabic)
+    if nura_context["additional_information"]:
+        recent_illness_context = (
+            "المرض الحديث غير مسجل كحقل مستقل؛ توجد معلومات إضافية محفوظة."
+            if arabic
+            else "Recent illness is not a separate field; saved additional information is available."
+        )
+    else:
+        recent_illness_context = (
+            "المرض الحديث والراحة الرقمية: غير مسجلين."
+            if arabic
+            else "recent illness and digital comfort: not recorded."
+        )
+    if arabic:
+        factors = (
+            f"السمع: {hearing}؛ البصر: {vision}؛ النوم: {sleep_quality}؛ "
+            f"المزاج: {mood}؛ اللغة: {language_label}؛ التعليم: {education}؛ "
+            f"الخلفية الثقافية: {culture}؛ {recent_illness_context}"
+        )
+        if sensory.get("hearing_difficulty") in ("Often", "Always") or sensory.get("vision_difficulty") in ("Often", "Always"):
+            factors += (
+                " قد تؤثر صعوبة السمع أو البصر في الأداء أثناء الفحص المعرفي، "
+                "لكن الإجابات لا تشخّص فقداناً حسياً ولا تثبت سبباً."
+            )
+        improvements = [
+            (
+                "أخبر فريق الرعاية بوقت حدوث صعوبة السمع أو البصر التي أبلغت عنها."
+                if sensory.get("hearing_difficulty") in ("Often", "Always")
+                or sensory.get("vision_difficulty") in ("Often", "Always")
+                else "سجّل أي تغيّر تلاحظه في السمع أو البصر."
+            ),
+            "أضف مدة النوم في تسجيل المتابعة اليومي.",
+            "دوّن أي تغيّر في الذاكرة أو الأنشطة اليومية لمناقشته مع فريق الرعاية.",
+        ]
+    else:
+        factors = (
+            f"Hearing: {hearing}; vision: {vision}; sleep: {sleep_quality}; "
+            f"mood: {mood}; language: {language_label}; education: {education}; "
+            f"cultural background: {culture}; {recent_illness_context} "
+            "Digital comfort: not recorded."
+        )
+        if sensory.get("hearing_difficulty") in ("Often", "Always") or sensory.get("vision_difficulty") in ("Often", "Always"):
+            factors += (
+                " Hearing or vision difficulty can affect performance on cognitive screening, "
+                "but these answers do not diagnose sensory loss or establish a cause."
+            )
+        improvements = [
+            (
+                "Tell your care team when the hearing or vision difficulty you reported occurs."
+                if sensory.get("hearing_difficulty") in ("Often", "Always")
+                or sensory.get("vision_difficulty") in ("Often", "Always")
+                else "Note any change you notice in hearing or vision."
+            ),
+            "Log sleep duration in your next daily check-in.",
+            "Write down any change in memory or daily activities for your care team.",
+        ]
+
+    reported_context = _reported_result_context(person)
+    if reported_context and not arabic:
+        factors += (
+            " Saved self-reports also mention "
+            + ", ".join(reported_context)
+            + "; these may be relevant context but do not establish a cause."
+        )
+    elif reported_context:
+        factors += (
+            " وتشير المعلومات التي قدمتها بنفسك إلى "
+            + "، ".join(reported_context)
+            + "؛ وقد تساعد في فهم السياق لكنها لا تثبت سبباً."
+        )
+
+    next_action = overview["next_best_action"]
+    action_title = next_action["title"]
+    if action_title == "Discuss sensory changes with your care team":
+        if sensory.get("hearing_difficulty") in ("Often", "Always"):
+            reason = (
+                "أبلغت عن صعوبة في السمع "
+                + (
+                    "بشكل متكرر."
+                    if sensory.get("hearing_difficulty") == "Often"
+                    else "دائماً."
+                )
+                if arabic
+                else (
+                    "you reported hearing difficulty: "
+                    f"{sensory.get('hearing_difficulty')}."
+                )
+            )
+        elif sensory.get("vision_difficulty") in ("Often", "Always"):
+            reason = (
+                "أبلغت عن صعوبة في البصر "
+                + (
+                    "بشكل متكرر."
+                    if sensory.get("vision_difficulty") == "Often"
+                    else "دائماً."
+                )
+                if arabic
+                else (
+                    "you reported vision difficulty: "
+                    f"{sensory.get('vision_difficulty')}."
+                )
+            )
+        else:
+            reason = (
+                "إجابات السمع أو البصر المسجلة تشير إلى الحاجة للمناقشة."
+                if arabic
+                else "your saved hearing or vision answers indicate this should be discussed."
+            )
+        action = (
+            "أخبر فريق الرعاية بصعوبة السمع أو البصر التي أبلغت عنها."
+            if arabic
+            else "Tell your care team about the hearing or vision difficulty you reported."
+        )
+        next_steps = (
+            f"سبب هذه الخطوة هو أن {reason} الإجابة ليست تشخيصاً. "
+            "لا يوجد موعد متابعة مسجل؛ اسأل فريق الرعاية عن التوقيت المناسب."
+            if arabic
+            else f"This follows because {reason} A questionnaire is not a diagnosis. "
+            "No follow-up date is saved; ask your care team when to review it."
+        )
+    elif action_title == "Follow up on an open referral":
+        action = (
+            "تحقق مع فريق الرعاية من حالة الإحالة المفتوحة."
+            if arabic
+            else "Check the status of your open referral with your care team."
+        )
+        next_steps = (
+            "توجد إحالة مفتوحة في ملفك. تواصل مع فريق الإحالة هذا الأسبوع لتأكيد الخطوة التالية."
+            if arabic
+            else "An open referral is saved. Contact the referral team this week to confirm the next step."
+        )
+    elif action_title == "Follow your clinician's recommendation":
+        action = result["recommendation"] or next_action["detail"]
+        next_steps = (
+            "هذه الخطوة مأخوذة من توصية الطبيب المسجلة. لا يوجد موعد إعادة تقييم محفوظ."
+            if arabic
+            else "This action comes from your clinician's saved recommendation. No recheck date is recorded."
+        )
+    elif action_title == "Build your health baseline":
+        action = (
+            "أكمل تسجيل المعلومات الصحية الأساسية."
+            if arabic
+            else "Complete your saved health and wellbeing baseline."
+        )
+        next_steps = (
+            "لم يتم حفظ خط الأساس الصحي بعد، لذلك لا توجد نقطة بداية للمقارنة."
+            if arabic
+            else "The health baseline is not saved yet, so there is no starting point for comparison."
+        )
+    elif action_title == "Complete hearing and vision":
+        action = (
+            "أكمل تسجيل إجابات السمع والبصر."
+            if arabic
+            else "Record your hearing and vision responses."
+        )
+        next_steps = (
+            "لم يتم حفظ إجابات السمع والبصر بعد. أكملها قبل مراجعة الوقاية التالية."
+            if arabic
+            else "Hearing and vision responses are not saved yet. Complete them before your next prevention review."
+        )
+    elif action_title == "Complete your morning check-in":
+        action = (
+            "سجّل نومك ومزاجك اليوم."
+            if arabic
+            else "Record today's sleep and mood check-in."
+        )
+        next_steps = (
+            "لم يتم حفظ متابعة اليوم. سجّل النوم والمزاج اليوم."
+            if arabic
+            else "Today's check-in is not saved. Record sleep and mood today."
+        )
+    else:
+        action = (
+            "اسأل فريق الرعاية عن توفر فحص معرفي معتمد."
+            if arabic
+            else "Ask your care team whether approved cognitive screening is available."
+        )
+        next_steps = (
+            "لا توجد نتيجة معرفية محفوظة، ولا يُنشئ التطبيق درجة. اسأل فريق الرعاية عن أداة معتمدة."
+            if arabic
+            else "No cognitive result is saved and the app does not create a score. Ask your care team about an approved instrument."
+        )
+
+    if any(term in lowered for term in ("barrier", "missed", "appointment", "transport", "cost")):
+        question = (
+            "ما العائق الأهم بالنسبة لك: الوقت، أو المواصلات، أو اللغة، أو القلق؟"
+            if arabic
+            else "What is the main barrier: time, transport, language, or worry?"
+        )
+    elif nura_context["additional_information"]:
+        question = (
+            "هل تتضمن المعلومات الإضافية المحفوظة مرضاً حديثاً أو تغيّراً في شعورك؟"
+            if arabic
+            else "Does your saved additional information mention a recent illness or change in how you feel?"
+        )
+    else:
+        question = (
+            "هل ترغب في مشاركة عائق أو تجهيز سؤال لفريق الرعاية؟"
+            if arabic
+            else "Would you like to share a barrier or prepare a question for your care team?"
+        )
+
+    if result["available"] and result["status"] == "REFER":
+        next_steps = (
+            "هذه الحالة تحتاج إلى مراجعة مختص صحي. تواصل مع طبيبك الآن لمناقشة الخطوة التالية. "
+            + next_steps
+            if arabic
+            else "This needs clinician review. Please contact your clinician now to discuss the next step. "
+            + next_steps
+        )
+
+    return _format_nura_reply(
+        language,
+        meaning.strip(),
+        factors,
+        improvements,
+        next_steps,
+        question,
+        action,
+    )
+
+
+def _child_nura_context(person: Person, db: Session) -> dict:
+    screenings = (
+        db.query(Screening)
+        .filter(
+            Screening.person_id == person.id,
+            Screening.kind == "CHILD_DEVELOPMENT",
+        )
+        .order_by(Screening.created_at.desc(), Screening.id.desc())
+        .all()
+    )
+    referrals = _open_referrals(db, person.id)
+    latest = screenings[0] if screenings else None
+    age_years, age_months = _saved_age(person)
+    if referrals:
+        action = {
+            "title": "Follow up on an open referral",
+            "detail": f"Check the status of your {referrals[0].specialty or 'healthcare'} referral with your care team.",
+            "route": "/screening/history",
+        }
+    elif latest and latest.clinician_reviewed and latest.next_action:
+        action = {
+            "title": "Follow your clinician's recommendation",
+            "detail": latest.next_action,
+            "route": "/screening/history",
+        }
+    elif latest:
+        action = {
+            "title": "Get the developmental screening reviewed",
+            "detail": "Ask your care team to review the saved developmental screening.",
+            "route": "/screening/history",
+        }
+    else:
+        action = {
+            "title": "Check the next Well-Child Visit",
+            "detail": "Ask your care team which of the 14 Well-Child Visits is due for your child's age.",
+            "route": "/screening/instruments",
+        }
+
+    latest_data = None
+    if latest:
+        raw_answers = latest.raw_answers or {}
+        milestones = raw_answers.get("milestones", {})
+        growth = raw_answers.get("growth", {})
+        milestone_areas = [
+            str(key)
+            for key, value in milestones.items()
+            if isinstance(milestones, dict) and value is not None and value != ""
+        ] if isinstance(milestones, dict) else []
+        growth_measurements = {}
+        if isinstance(growth, dict):
+            units = {
+                "weight_kg": "kg",
+                "height_cm": "cm",
+                "head_circumference_cm": "cm",
+            }
+            growth_measurements = {
+                str(key): {
+                    "value": value,
+                    "unit": units.get(str(key)),
+                }
+                for key, value in growth.items()
+                if isinstance(value, (int, float)) and not isinstance(value, bool)
+            }
+        latest_data = {
+            "age_months": latest.visit_no,
+            "created_at": (
+                latest.created_at.isoformat()
+                if latest.created_at
+                else None
+            ),
+            "instrument_name": raw_answers.get("instrument_name"),
+            "milestone_areas_saved": (
+                len(milestones) if isinstance(milestones, dict) else 0
+            ),
+            "milestone_areas": milestone_areas,
+            "growth_measures_saved": (
+                len(growth) if isinstance(growth, dict) else 0
+            ),
+            "growth_measurements": growth_measurements,
+            "clinician_reviewed": bool(latest.clinician_reviewed),
+            "status": latest.status,
+            "risk": latest.risk if latest.clinician_reviewed else None,
+            "next_action": (
+                latest.next_action if latest.clinician_reviewed else None
+            ),
+        }
+
+    return {
+        "person_type": "child",
+        "person_id": person.id,
+        "person_name": person.name,
+        "language": person.language or "en",
+        "age_years": age_years,
+        "age_months": age_months,
+        "next_best_action": action,
+        "latest_screening": latest_data,
+        "open_referrals": [
+            {
+                "specialty": referral.specialty,
+                "status": referral.status,
+            }
+            for referral in referrals
+        ],
+    }
+
+
+def _child_nura_reply(
+    message: str,
+    person: Person,
+    context: dict,
+) -> str:
+    arabic = person.language == "ar"
+    latest = context["latest_screening"]
+    _, age_months = _saved_age(person)
+    age_text = (
+        f"عمر الطفل {age_months} شهراً"
+        if arabic and age_months is not None
+        else (
+            f"your child is {age_months} months old"
+            if age_months is not None
+            else ""
+        )
+    )
+    identity = (
+        f"{person.name}، {age_text}"
+        if arabic
+        else f"{person.name}, {age_text}".strip(", ")
+    )
+
+    if latest and latest["clinician_reviewed"] and latest["risk"] != "NOT_ASSESSED":
+        risk = latest["risk"]
+        meaning = (
+            f"{identity}: راجع الطبيب سجل النمو المحفوظ وسجّل مستوى المتابعة {risk}. "
+            "هذا توجيه متابعة وليس تشخيصاً."
+            if arabic
+            else (
+                f"{identity}: your clinician reviewed the saved developmental record "
+                f"and recorded follow-up level {risk}. This is guidance, not a diagnosis."
+            )
+        )
+    elif latest and latest["clinician_reviewed"]:
+        visit_age = latest["age_months"]
+        meaning = (
+            f"{identity}: راجع الطبيب سجل النمو المحفوظ من عمر {visit_age} شهراً، "
+            "لكنه لم يسجل مستوى مخاطر. هذا ليس تشخيصاً."
+            if arabic
+            else (
+                f"{identity}: your clinician reviewed the developmental record from "
+                f"age {visit_age} months but did not record a risk level. This is not a diagnosis."
+            )
+        )
+    elif latest:
+        visit_age = latest["age_months"]
+        meaning = (
+            f"{identity}: يوجد سجل نمو محفوظ من عمر {visit_age} شهراً، "
+            "وهو بانتظار مراجعة الطبيب. لم تُسجل نتيجة أو درجة."
+            if arabic
+            else (
+                f"{identity}: a developmental record is saved from age {visit_age} months "
+                "and is awaiting clinician review. No result or score is recorded."
+            )
+        )
+    else:
+        meaning = (
+            f"{identity}: لا يوجد سجل فحص نمو محفوظ حتى الآن. "
+            "لن أخمّن نتيجة أو درجة."
+            if arabic
+            else f"{identity}: no developmental screening record is saved yet. I will not guess a result or score."
+        )
+
+    if latest:
+        milestone_areas = latest["milestone_areas"]
+        if arabic:
+            milestone_labels = {
+                "communication": "التواصل",
+                "language": "اللغة",
+                "motor": "الحركة",
+                "social": "التفاعل الاجتماعي",
+                "social_emotional": "التفاعل الاجتماعي والعاطفي",
+                "cognitive": "التطور المعرفي",
+            }
+            milestone_areas = [
+                milestone_labels.get(area, area)
+                for area in milestone_areas
+            ]
+        growth_measurements = latest["growth_measurements"]
+        growth_labels = {
+            "weight_kg": ("الوزن", "kg") if arabic else ("weight", "kg"),
+            "height_cm": ("الطول", "cm") if arabic else ("height", "cm"),
+            "head_circumference_cm": (
+                ("محيط الرأس", "cm")
+                if arabic
+                else ("head circumference", "cm")
+            ),
+        }
+        growth_details = [
+            f"{growth_labels.get(key, (key, data['unit']))[0]} "
+            f"{data['value']}{' ' + data['unit'] if data['unit'] else ''}"
+            for key, data in growth_measurements.items()
+        ]
+        if milestone_areas or growth_details:
+            if arabic:
+                meaning += (
+                    " المجالات المسجلة: "
+                    + ("، ".join(milestone_areas) or "غير مسجل")
+                    + "؛ قياسات النمو: "
+                    + ("، ".join(growth_details) or "غير مسجلة")
+                    + "."
+                )
+            else:
+                meaning += (
+                    " Saved milestone areas: "
+                    + (", ".join(milestone_areas) or "not recorded")
+                    + "; growth measurements: "
+                    + (", ".join(growth_details) or "not recorded")
+                    + "."
+                )
+        factors = (
+            f"المراحل: {', '.join(milestone_areas) or 'غير مسجل'}؛ "
+            f"قياسات النمو: {', '.join(growth_details) or 'غير مسجلة'}؛ "
+            "النوم والتغذية والمرض الحديث: غير مسجل في هذا الفحص."
+            if arabic
+            else (
+                f"Milestones: {', '.join(milestone_areas) or 'not recorded'}; "
+                f"growth measurements: {', '.join(growth_details) or 'not recorded'}; "
+                "sleep, feeding, and recent illness: not recorded in this screening."
+            )
+        )
+    else:
+        factors = (
+            "لا يوجد فحص نمو محفوظ؛ معلومات النوم والتغذية والمرض الحديث غير مسجلة."
+            if arabic
+            else "No developmental screening is saved; sleep, feeding, and recent illness are not recorded."
+        )
+
+    improvements = (
+        [
+            "اقرأ أو غنِّ مع طفلك خمس دقائق يومياً.",
+            "دوّن ملاحظة واحدة عن التواصل أو الحركة أثناء اللعب الآمن.",
+            "اكتب أي سؤال عن النوم أو التغذية أو النمو لفريق الرعاية.",
+        ]
+        if arabic
+        else [
+            "Read or sing together for five minutes today.",
+            "Note one communication or movement observation during safe play.",
+            "Write down any sleep, feeding, or growth question for the care team.",
+        ]
+    )
+
+    if context["open_referrals"]:
+        action = (
+            "تحقق مع فريق الرعاية من حالة الإحالة المفتوحة هذا الأسبوع."
+            if arabic
+            else "Check the open referral status with your care team this week."
+        )
+        next_steps = (
+            "هناك إحالة مفتوحة محفوظة في الملف. تواصل مع فريق الرعاية هذا الأسبوع لتأكيد الخطوة التالية."
+            if arabic
+            else "An open referral is saved. Contact the care team this week to confirm the next step."
+        )
+    elif latest and not latest["clinician_reviewed"]:
+        action = (
+            "اطلب من فريق الرعاية مراجعة سجل النمو المحفوظ."
+            if arabic
+            else "Ask your care team to review the saved developmental screening."
+        )
+        next_steps = (
+            "السجل بانتظار مراجعة الطبيب ولا توجد نتيجة أو درجة بعد. لا يوجد تاريخ مراجعة مسجل."
+            if arabic
+            else "The record is awaiting clinician review, with no result or score yet. No review date is saved."
+        )
+    elif latest and latest["clinician_reviewed"]:
+        action = latest["next_action"] or context["next_best_action"]["detail"]
+        next_steps = (
+            "اتبع توصية الطبيب المسجلة. لا يوجد موعد متابعة آخر مسجل."
+            if arabic
+            else "Follow the clinician-entered recommendation. No later follow-up date is saved."
+        )
+    else:
+        action = (
+            "اسأل فريق الرعاية عن زيارة الطفل الوقائية المستحقة لعمره."
+            if arabic
+            else "Ask your care team which Well-Child Visit (1–14) is due for your child's age."
+        )
+        next_steps = (
+            "لا يوجد سجل فحص محفوظ، ولا يظهر موعد زيارة محدد في الملف."
+            if arabic
+            else "No screening record or specific visit due date is saved."
+        )
+
+    if any(
+        term in message.lower()
+        for term in ("barrier", "missed", "transport", "عائق", "مواصلات", "فاتني")
+    ):
+        question = (
+            "ما الذي يجعل زيارة الطفل الوقائية صعبة: الوقت، أو المواصلات، أو اللغة، أو القلق؟"
+            if arabic
+            else "What makes the Well-Child Visit difficult: time, transport, language, or worry?"
+        )
+    else:
+        question = (
+            "هل يوجد تغيير حديث في النوم أو التغذية أو النمو تريد تدوينه؟"
+            if arabic
+            else "Is there a recent change in sleep, feeding, or development you would like to note?"
+        )
+
+    if latest and latest["risk"] == "URGENT_REVIEW":
+        next_steps = (
+            "سجّل الطبيب أن مراجعة مختص مطلوبة بشكل عاجل. تواصل مع طبيب طفلك الآن. "
+            + next_steps
+            if arabic
+            else "Your clinician recorded that urgent review is needed. Contact your child's clinician now. "
+            + next_steps
+        )
+        action = (
+            "تواصل مع طبيب طفلك الآن بشأن المراجعة العاجلة."
+            if arabic
+            else "Contact your child's clinician now about the urgent review."
+        )
+
+    return _format_nura_reply(
+        person.language or "en",
+        meaning,
+        factors,
+        improvements,
+        next_steps,
+        question,
+        action,
+    )
+
+
+@router.get("/nura-context")
+def nura_context(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    person = _get_person(current_user, db)
+    if current_user.role == "adult":
+        overview = _build_overview(person, db)
+        return {
+            "person_type": "adult",
+            "person_name": person.name,
+            "language": person.language or "en",
+            "next_best_action": overview["next_best_action"],
+        }
+    return _child_nura_context(person, db)
+
+
 @router.post("/chat")
 def chat(
     payload: ChatRequest,
@@ -720,12 +1488,6 @@ def chat(
     db: Session = Depends(get_db),
 ):
     person = _get_person(current_user, db)
-    if current_user.role != "adult":
-        raise HTTPException(
-            status_code=403,
-            detail="Nura's adult prevention guide requires an adult account.",
-        )
-
     message = payload.message.strip()
     red_flags = check_red_flags(message)
     if red_flags:
@@ -747,137 +1509,12 @@ def chat(
             "disclaimer": safety_disclaimer(),
         }
 
-    lowered = message.lower()
-    overview = _build_overview(person, db)
-    if person.language == "ar":
-        if any(
-            term in lowered
-            for term in (
-                "نتيجتي",
-                "اشرح النتيجة",
-                "نتائجي",
-                "explain my result",
-                "explain my results",
-                "what is my result",
-            )
-        ):
-            result = _clinical_result(person, db)
-            if result["available"]:
-                context = _reported_result_context(person)
-                context_text = (
-                    " تتضمن إجاباتك أيضاً: "
-                    + "، ".join(context)
-                    + ". قد تفيد هذه المعلومات الطبيب في فهم السياق، لكنها لا تثبت وجود سبب."
-                    if context
-                    else ""
-                )
-                reply = (
-                    f"سجّل طبيبك الحالة {result['status']} ومستوى المخاطر "
-                    f"{result['risk']}. هذه معلومات أدخلها الطبيب وليست "
-                    "تشخيصاً أو درجة أنشأها الذكاء الاصطناعي. الخطوة "
-                    f"الموصى بها: {result['recommendation']}"
-                    f"{context_text}"
-                )
-            else:
-                reply = (
-                    "تم حفظ إجاباتك، لكنها بانتظار مراجعة الطبيب. لا "
-                    "يحسب التطبيق حالة أو مستوى مخاطر من الاستبيان."
-                )
-        elif any(
-            term in lowered
-            for term in (
-                "موا",
-                "إدراكي",
-                "الإدراك",
-                "الفحص المعرفي",
-                "الذاكرة",
-                "نتيجة الفحص",
-            )
-        ):
-            reply = (
-                "لا توجد نتيجة لفحص معرفي معتمد في ملفك، لذلك لا يمكنني "
-                "تفسير نتيجة أو تقدير درجة. لن يتوفر الفحص إلا بعد اعتماد "
-                "أداة مناسبة والحصول على الموافقات السريرية اللازمة."
-            )
-        elif any(term in lowered for term in ("فاتني", "عائق", "مواصلات", "تكلفة", "حجز", "موعد", "قلق")):
-            reply = (
-                "لنجعل الخطوة التالية أسهل. ما العائق الأهم بالنسبة لك: "
-                "الوقت، أو المواصلات، أو التكلفة، أو اللغة، أو القلق، أو "
-                "شيء آخر؟ يمكنني مساعدتك في تجهيز أسئلة لفريق الرعاية، "
-                "لكن لا أستطيع حجز موعد أو تأكيد توفره."
-            )
-        elif any(term in lowered for term in ("السمع", "النظر", "الرؤية", "الأذن", "العين")):
-            reply = (
-                "إجاباتك عن السمع والبصر هي معلومات تقدمها بنفسك وليست "
-                "فحصاً تشخيصياً. إذا لاحظت تغيّراً، يمكنك مناقشته مع مختص "
-                "صحي مؤهل."
-            )
-        else:
-            reply = (
-                "مرحباً، أنا نورة. يمكنني شرح خطوات الوقاية المسجلة "
-                "ومساعدتك على التفكير في العوائق وتجهيز أسئلة لفريق الرعاية. "
-                "لا أقدم تشخيصاً ولا أحجز المواعيد. خطوتك التالية: "
-                f"{overview['next_best_action']['detail']}"
-            )
-        return {
-            "reply": reply,
-            "urgent_human_support": False,
-            "disclaimer": "نورة دليل للمعلومات وليست بديلاً عن المختص الصحي أو التشخيص الطبي.",
-        }
-
-    if any(term in lowered for term in ("explain my result", "explain my results", "what is my result")):
-        result = _clinical_result(person, db)
-        if result["available"]:
-            context = _reported_result_context(person)
-            context_text = (
-                " Your self-reported information also mentions "
-                + ", ".join(context)
-                + ". This may be relevant context for your clinician, but it does not establish a cause."
-                if context
-                else ""
-            )
-            reply = (
-                f"Your clinician recorded status {result['status']} and "
-                f"risk {result['risk']}. These were entered by your clinician; "
-                "they are not an AI-generated score or diagnosis. "
-                f"The recommended next step is: {result['recommendation']}."
-                f"{context_text}"
-            )
-        else:
-            reply = (
-                "Your responses are saved and awaiting clinician review. "
-                "VitaBridge does not calculate a status or risk level from "
-                "the questionnaire."
-            )
-    elif any(term in lowered for term in ("moca", "cognitive score", "memory score", "screening result")):
-        reply = (
-            "There is no approved cognitive screening result recorded in "
-            "your profile, so I cannot interpret or estimate a cognitive "
-            "score. Cognitive screening will become available only when an "
-            "approved instrument and clinical authorization are in place. "
-            f"For now, your next step is: {overview['next_best_action']['detail']}"
-        )
-    elif any(term in lowered for term in ("missed", "barrier", "transport", "cost", "booking", "appointment")):
-        reply = (
-            "Let's make the next step easier. What is the main barrier: "
-            "finding a convenient time, transport, cost, language, worry, "
-            "or something else? I can help you prepare questions for your "
-            "care team, but I cannot book or confirm a clinic appointment."
-        )
-    elif any(term in lowered for term in ("hearing", "vision", "eyes", "ears")):
-        reply = (
-            "Your hearing and vision answers are self-reported and do not "
-            "test or diagnose a condition. If you have noticed a change, "
-            "consider discussing it with a qualified healthcare professional. "
-            f"{overview['next_best_action']['detail']}"
-        )
+    if current_user.role == "adult":
+        overview = _build_overview(person, db)
+        reply = _adult_nura_reply(message, person, db, overview)
     else:
-        reply = (
-            f"Hi, I'm Nura. Your next best action is: "
-            f"{overview['next_best_action']['detail']} "
-            "I can explain your saved baseline, help think through a barrier, "
-            "or suggest questions to bring to your care team."
-        )
+        context = _child_nura_context(person, db)
+        reply = _child_nura_reply(message, person, context)
 
     return {
         "reply": reply,

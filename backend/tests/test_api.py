@@ -434,6 +434,19 @@ def test_adult_prevention_agent_uses_real_data_and_records_check_ins():
     assert len(data["prevention_plan"]) == 6
     assert data["next_best_action"]["route"] == "/adult/screening/baseline"
 
+    next_step = client.post(
+        "/api/agent/chat",
+        headers=headers,
+        json={"message": "What is my next step?"},
+    )
+    assert next_step.status_code == 200, next_step.text
+    next_step_reply = next_step.json()["reply"]
+    assert "WHAT THIS MEANS FOR YOU" in next_step_reply
+    assert "WHAT COULD BE AFFECTING IT" in next_step_reply
+    assert "the health baseline is not saved yet" in next_step_reply.lower()
+    assert "Complete your saved health and wellbeing baseline" in next_step_reply
+    assert len(next_step_reply.split()) <= 180
+
     empty_checkin = client.post(
         "/api/agent/check-in",
         headers=headers,
@@ -476,7 +489,7 @@ def test_adult_prevention_agent_uses_real_data_and_records_check_ins():
         json={"message": "What is my cognitive score?"},
     )
     assert cognitive_answer.status_code == 200, cognitive_answer.text
-    assert "no approved cognitive screening result" in cognitive_answer.json()["reply"].lower()
+    assert "no approved cognitive score" in cognitive_answer.json()["reply"].lower()
 
     urgent_answer = client.post(
         "/api/agent/chat",
@@ -609,7 +622,12 @@ def test_arabic_adult_profile_receives_nura_guidance_in_arabic():
         json={"message": "ما خطوتي التالية؟"},
     )
     assert answer.status_code == 200, answer.text
-    assert "مرحباً" in answer.json()["reply"]
+    reply = answer.json()["reply"]
+    assert "ماذا يعني ذلك لك" in reply
+    assert "ما الذي قد يؤثر فيه" in reply
+    assert "غير مسجل" in reply
+    assert "أفضل خطوة تالية واحدة" in reply
+    assert reply.rstrip().endswith("**أكمل تسجيل المعلومات الصحية الأساسية.**")
 
     urgent_answer = client.post(
         "/api/agent/chat",
@@ -619,6 +637,77 @@ def test_arabic_adult_profile_receives_nura_guidance_in_arabic():
     assert urgent_answer.status_code == 200, urgent_answer.text
     assert urgent_answer.json()["urgent_human_support"] is True
     assert "خدمات الطوارئ" in urgent_answer.json()["reply"]
+
+
+def test_nura_supports_child_context_without_inventing_screening_results():
+    registration = client.post(
+        "/api/auth/register",
+        json={
+            "name": "Synthetic Child Parent",
+            "email": "parent.nura.child@example.com",
+            "password": PASSWORD,
+            "role": "parent",
+        },
+    )
+    assert registration.status_code == 201, registration.text
+    headers = {
+        "Authorization": f"Bearer {registration.json()['token']}",
+    }
+    birth_date = date.today().replace(year=date.today().year - 2).isoformat()
+    profile = client.post(
+        "/api/users/profile",
+        headers=headers,
+        json={
+            "profile_type": "child",
+            "name": "Synthetic Child",
+            "date_of_birth": birth_date,
+            "sex": "Female",
+            "phone": "0501234567",
+            "guardian_name": "Synthetic Parent",
+            "relationship": "Parent",
+            "consent": True,
+        },
+    )
+    assert profile.status_code == 200, profile.text
+
+    empty_context = client.get("/api/agent/nura-context", headers=headers)
+    assert empty_context.status_code == 200, empty_context.text
+    assert empty_context.json()["person_type"] == "child"
+    assert empty_context.json()["next_best_action"]["title"] == "Check the next Well-Child Visit"
+    empty_reply = client.post(
+        "/api/agent/chat",
+        headers=headers,
+        json={"message": "What is our next step?"},
+    )
+    assert empty_reply.status_code == 200, empty_reply.text
+    assert "no developmental screening record is saved yet" in empty_reply.json()["reply"].lower()
+
+    screening = client.post(
+        "/api/screening/child",
+        headers=headers,
+        json={
+            "age_months": 24,
+            "milestones": {"communication": "observed"},
+            "growth": {"weight_kg": 12.3},
+            "instrument_name": "Synthetic developmental observation",
+        },
+    )
+    assert screening.status_code == 200, screening.text
+
+    reply = client.post(
+        "/api/agent/chat",
+        headers=headers,
+        json={"message": "Explain my child's screening"},
+    )
+    assert reply.status_code == 200, reply.text
+    text = reply.json()["reply"]
+    assert "awaiting clinician review" in text.lower()
+    assert "no result or score is recorded" in text.lower()
+    assert "Saved milestone areas: communication" in text
+    assert "weight 12.3 kg" in text
+    assert "blood pressure" not in text.lower()
+    assert "moca" not in text.lower()
+    assert len(text.split()) <= 180
 
 
 def test_adult_clinician_review_requires_clinician_and_creates_referral():
@@ -675,6 +764,17 @@ def test_adult_clinician_review_requires_clinician_and_creates_referral():
         },
     )
     assert hearing_vision.status_code == 200, hearing_vision.text
+
+    next_step = client.post(
+        "/api/agent/chat",
+        headers=headers,
+        json={"message": "What is my next step?"},
+    )
+    assert next_step.status_code == 200, next_step.text
+    next_step_reply = next_step.json()["reply"]
+    assert "you reported hearing difficulty: often" in next_step_reply.lower()
+    assert "questionnaire is not a diagnosis" in next_step_reply.lower()
+    assert "tell your care team about the hearing or vision difficulty" in next_step_reply.lower()
 
     db = SessionLocal()
     try:
@@ -756,7 +856,7 @@ def test_adult_clinician_review_requires_clinician_and_creates_referral():
     assert explanation.status_code == 200, explanation.text
     assert "status WATCH and risk MODERATE" in explanation.json()["reply"]
     assert review_payload["next_action"] in explanation.json()["reply"]
-    assert "does not establish a cause" in explanation.json()["reply"]
+    assert "do not diagnose sensory loss or establish a cause" in explanation.json()["reply"]
 
     updated_hearing_vision = client.post(
         "/api/screening/adult/hearing-vision",

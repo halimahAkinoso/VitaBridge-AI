@@ -266,6 +266,37 @@ export default function ParentDashboard() {
           styles.card,
           pressed && styles.pressedCard,
         ]}
+        onPress={() => router.push('/ai-assistant')}
+        accessibilityRole="button"
+        accessibilityLabel="Open Nura prevention guide"
+      >
+        <View style={styles.cardHeader}>
+          <MaterialCommunityIcons
+            name="brain"
+            size={35}
+            color={COLORS.teal}
+          />
+
+          <MaterialCommunityIcons
+            name="chevron-right"
+            size={27}
+            color={COLORS.muted}
+          />
+        </View>
+
+        <Text style={styles.cardTitle}>Nura Prevention Guide</Text>
+        <Text style={styles.cardText}>
+          Ask about saved developmental records, the next Well-Child Visit
+          and questions to discuss with your care team.
+        </Text>
+        <Text style={styles.cardAction}>Ask Nura</Text>
+      </Pressable>
+
+      <Pressable
+        style={({ pressed }) => [
+          styles.card,
+          pressed && styles.pressedCard,
+        ]}
         onPress={() => router.push('/passport')}
         accessibilityRole="button"
         accessibilityLabel="Open family health passport"
