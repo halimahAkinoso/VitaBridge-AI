@@ -2,6 +2,7 @@
 import React from 'react';
 import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
+import { Platform } from 'react-native';
 import {
   QueryClient,
   QueryClientProvider,
@@ -25,6 +26,7 @@ export default function RootLayout() {
             },
             headerTintColor: COLORS.text,
             headerShadowVisible: false,
+            animation: Platform.OS === 'web' ? 'none' : undefined,
           }}
         />
       </AuthProvider>
