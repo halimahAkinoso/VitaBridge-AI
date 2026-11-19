@@ -4,8 +4,12 @@ VitaBridge AI Backend
 Protecting Brain Health Earlier
 """
 
-from fastapi import FastAPI
+import os
+from pathlib import Path
+
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 
 # Import models before creating database tables
 from app import models
@@ -36,11 +40,23 @@ app = FastAPI(
     ),
 )
 
-# Development CORS configuration
-# Restrict allowed origins before production deployment.
+default_cors_origins = (
+    "http://localhost:8081,"
+    "http://127.0.0.1:8081,"
+    "http://localhost:8082,"
+    "http://127.0.0.1:8082,"
+    "http://localhost:19006,"
+    "http://127.0.0.1:19006"
+)
+cors_origins = [
+    origin.strip()
+    for origin in os.getenv("CORS_ORIGINS", default_cors_origins).split(",")
+    if origin.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=cors_origins,
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -74,10 +90,14 @@ app.include_router(
     prefix="/api/notifications",
     tags=["Notifications"],
 )
+WEB_ROOT = Path(__file__).resolve().parents[1] / "web-dist"
 
 
 @app.get("/")
 def root():
+    index = WEB_ROOT / "index.html"
+    if WEB_ROOT.is_dir() and index.is_file():
+        return FileResponse(index)
     return {
         "message": "VitaBridge AI — Protecting Brain Health Earlier",
         "docs": "/docs",
@@ -96,3 +116,25 @@ def health():
             "TriageAgent",
         ],
     }
+
+
+@app.get("/{full_path:path}", include_in_schema=False)
+def serve_web_app(full_path: str):
+    if full_path == "api" or full_path.startswith("api/"):
+        raise HTTPException(status_code=404, detail="Not found.")
+
+    web_root = WEB_ROOT.resolve()
+    if not web_root.is_dir():
+        raise HTTPException(status_code=404, detail="Not found.")
+
+    requested = (web_root / full_path).resolve()
+    if not requested.is_relative_to(web_root):
+        raise HTTPException(status_code=404, detail="Not found.")
+    if requested.is_file():
+        return FileResponse(requested)
+
+    index = web_root / "index.html"
+    if not Path(full_path).suffix and index.is_file():
+        return FileResponse(index)
+
+    raise HTTPException(status_code=404, detail="Not found.")

@@ -1,0 +1,13 @@
+.git/
+**/.env
+**/.env.*
+!**/.env.example
+**/node_modules/
+**/.expo/
+**/dist/
+**/__pycache__/
+**/*.py[cod]
+**/.venv/
+**/venv/
+**/*.db
+**/.conda/

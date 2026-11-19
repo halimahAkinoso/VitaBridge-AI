@@ -19,9 +19,10 @@ export const SHADOW = {
   elevation: 2,
 };
 
-const publicEnvironment = process.env as typeof process.env & {
-  EXPO_PUBLIC_API_URL?: string;
-};
-
 export const API_URL =
-  publicEnvironment.EXPO_PUBLIC_API_URL || 'http://localhost:8000';
+  (
+    process.env as typeof process.env & {
+      EXPO_PUBLIC_API_URL?: string;
+    }
+  ).EXPO_PUBLIC_API_URL ??
+  (process.env.NODE_ENV === 'development' ? 'http://localhost:8000' : '');

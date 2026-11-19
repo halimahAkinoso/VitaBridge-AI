@@ -11,10 +11,12 @@ from jose import jwt
 
 # Development fallback only.
 # Set a strong random JWT_SECRET environment variable before deployment.
-SECRET = os.getenv(
-    "JWT_SECRET",
-    "VitaBridge-local-development-secret-change-before-deployment",
-)
+APP_ENV = os.getenv("APP_ENV", "development").lower()
+configured_secret = os.getenv("JWT_SECRET")
+if APP_ENV in {"demo", "production"} and not configured_secret:
+    raise RuntimeError("JWT_SECRET must be configured outside development.")
+
+SECRET = configured_secret or "VitaBridge-local-development-secret-change-before-deployment"
 
 ALG = "HS256"
 

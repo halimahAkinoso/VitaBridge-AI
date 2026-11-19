@@ -1,7 +1,13 @@
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import sessionmaker, declarative_base
 import os
-DATABASE_URL=os.getenv("DATABASE_URL","sqlite:///./vitabridge.db")
+
+APP_ENV = os.getenv("APP_ENV", "development").lower()
+configured_database_url = os.getenv("DATABASE_URL")
+if APP_ENV in {"demo", "production"} and not configured_database_url:
+    raise RuntimeError("DATABASE_URL must be configured outside development.")
+
+DATABASE_URL = configured_database_url or "sqlite:///./vitabridge.db"
 engine=create_engine(DATABASE_URL, connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {})
 SessionLocal=sessionmaker(bind=engine, autoflush=False, autocommit=False)
 Base=declarative_base()

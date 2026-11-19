@@ -1,0 +1,34 @@
+services:
+  - type: web
+    name: vitabridge-ai-demo
+    runtime: docker
+    region: frankfurt
+    plan: free
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    envVars:
+      - key: APP_ENV
+        value: demo
+      - key: DATABASE_URL
+        fromDatabase:
+          name: vitabridge-ai-demo-db
+          property: connectionString
+      - key: JWT_SECRET
+        generateValue: true
+      - key: CORS_ORIGINS
+        value: ""
+      - key: INITIAL_ADMIN_NAME
+        value: "VitaBridge Demo Administrator"
+      - key: INITIAL_ADMIN_EMAIL
+        sync: false
+      - key: INITIAL_ADMIN_PASSWORD
+        sync: false
+
+databases:
+  - name: vitabridge-ai-demo-db
+    databaseName: vitabridge_demo
+    user: vitabridge_demo
+    region: frankfurt
+    plan: free
+    postgresMajorVersion: "16"
